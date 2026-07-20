@@ -146,13 +146,14 @@ pub fn prove_sharded_app(job: ShardedAppProverJob) -> ProverResult {
     );
 
     match prove_sharded_app_impl(job) {
-        Ok(results) => ProverResult::Success(results),
+        Ok(Some(results)) => ProverResult::Success(results),
+        Ok(None) => ProverResult::Canceled,
         Err(e) => ProverResult::Error(format!("Sharded app prove failed: {}", e)),
     }
 }
 
 #[cfg(feature = "mock-provers")]
-fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> {
+fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Option<Vec<ProofResult>>> {
     use proof::Segment;
 
     // Time the execution phase
@@ -241,7 +242,7 @@ fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> 
         }
     }
 
-    Ok(results)
+    Ok(Some(results))
 }
 
 // ============================================================================
@@ -688,16 +689,19 @@ mod real_impl {
         );
 
         match prove_sharded_app_impl_with_prover(job, instances, app_prover) {
-            Ok(results) => ProverResult::Success(results),
+            Ok(Some(results)) => ProverResult::Success(results),
+            Ok(None) => ProverResult::Canceled,
             Err(e) => ProverResult::Error(format!("Sharded app prove failed: {}", e)),
         }
     }
 
+    /// `Ok(None)` when the proof was canceled partway, which leaves the
+    /// segment set incomplete and so has nothing to report.
     fn prove_sharded_app_impl_with_prover(
         job: ShardedAppProverJob,
         instances: &AppExecutionInstances,
         app_prover: &mut ProverType,
-    ) -> Result<Vec<ProofResult>> {
+    ) -> Result<Option<Vec<ProofResult>>> {
         // Validate job parameters
         if job.num_provers == 0 {
             return Err(eyre::eyre!("num_provers cannot be 0"));
@@ -709,6 +713,8 @@ mod real_impl {
                 job.num_provers
             ));
         }
+
+        let proof_uuid = job.context.proof_uuid.clone();
 
         // Read input from disk
         info!("Reading input from {}", job.input_path);
@@ -745,6 +751,7 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        let executor_proof_uuid = job.context.proof_uuid.clone();
 
         // --- Executor thread ---
         // Runs metered execution, discovers segments, sends snapshots + metadata
@@ -765,6 +772,9 @@ mod real_impl {
             info!("Executor thread: starting metered execution");
 
             loop {
+                if crate::cancellation::is_cancelled(&executor_proof_uuid) {
+                    return Err(eyre::eyre!("{executor_proof_uuid} was canceled"));
+                }
                 exec_state = metered_interpreter.execute_metered_until_suspend(exec_state)?;
 
                 // Handle exit code
@@ -861,6 +871,10 @@ mod real_impl {
         let mut app_results: Vec<ProofResult> = Vec::new();
         let mut prover_err: Option<eyre::Report> = None;
         for prove_data in prove_rx.iter() {
+            if crate::cancellation::is_cancelled(&proof_uuid) {
+                info!("Prover: stopping, {proof_uuid} was canceled");
+                return Ok(None);
+            }
             info!("Prover: proving segment {}", prove_data.segment_idx);
             let segment_start = std::time::Instant::now();
 
@@ -1040,7 +1054,7 @@ mod real_impl {
             );
         }
 
-        Ok(app_results)
+        Ok(Some(app_results))
     }
 
     fn consumer_failure(error_message: String) -> ProverResult {
@@ -1072,6 +1086,10 @@ mod real_impl {
         let mut results = Vec::new();
 
         for prove_data in prove_rx.iter() {
+            if crate::cancellation::is_cancelled(&context.proof_uuid) {
+                info!("Consumer: stopping, {} was canceled", context.proof_uuid);
+                return ProverResult::Canceled;
+            }
             info!("Consumer: proving segment {}", prove_data.segment_idx);
             let segment_start = std::time::Instant::now();
 
@@ -1268,7 +1286,8 @@ mod real_impl {
         let coordinator: ParallelCoordinatorFn = Box::new(
             move |instances: &AppExecutionInstances, app_prover: &mut ProverType| {
                 match coordinate_parallel_prove(job, instances, app_prover, prove_tx, prove_rx) {
-                    Ok(results) => ProverResult::Success(results),
+                    Ok(Some(results)) => ProverResult::Success(results),
+                    Ok(None) => ProverResult::Canceled,
                     Err(e) => ProverResult::Error(format!("Parallel app prove failed: {}", e)),
                 }
             },
@@ -1283,13 +1302,17 @@ mod real_impl {
     /// 1. Reads input and creates the executor thread (feeds segments via prove_tx)
     /// 2. Acts as consumer-0 (proves segments from prove_rx)
     /// 3. Streams results via job.result_tx as each segment completes
+    ///
+    /// `Ok(None)` when the proof was canceled partway, which leaves the
+    /// segment set incomplete and so has nothing to report.
     fn coordinate_parallel_prove(
         job: ShardedAppProverJob,
         instances: &AppExecutionInstances,
         app_prover: &mut ProverType,
         prove_tx: crossbeam::channel::Sender<ProveData>,
         prove_rx: crossbeam::channel::Receiver<ProveData>,
-    ) -> Result<Vec<ProofResult>> {
+    ) -> Result<Option<Vec<ProofResult>>> {
+        let coordinator_proof_uuid = job.context.proof_uuid.clone();
         // Validate job parameters
         if job.num_provers == 0 {
             return Err(eyre::eyre!("num_provers cannot be 0"));
@@ -1330,6 +1353,7 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        let executor_proof_uuid = job.context.proof_uuid.clone();
 
         // --- Executor thread ---
         // Same as single-threaded version: discovers segments, sends via shared channel
@@ -1349,6 +1373,9 @@ mod real_impl {
             info!("Executor thread (parallel): starting metered execution");
 
             loop {
+                if crate::cancellation::is_cancelled(&executor_proof_uuid) {
+                    return Err(eyre::eyre!("{executor_proof_uuid} was canceled"));
+                }
                 exec_state = metered_interpreter.execute_metered_until_suspend(exec_state)?;
 
                 let mut exit_code = Ok(None);
@@ -1445,6 +1472,10 @@ mod real_impl {
         let mut prover_err: Option<eyre::Report> = None;
 
         for prove_data in prove_rx.iter() {
+            if crate::cancellation::is_cancelled(&coordinator_proof_uuid) {
+                info!("Coordinator-consumer: stopping, {coordinator_proof_uuid} was canceled");
+                return Ok(None);
+            }
             info!(
                 "Coordinator-consumer: proving segment {}",
                 prove_data.segment_idx
@@ -1620,7 +1651,7 @@ mod real_impl {
             executor_result.num_segments, job.max_app_provers
         );
 
-        Ok(my_results)
+        Ok(Some(my_results))
     }
 
     /// Legacy convenience implementation that builds everything inline.
@@ -1628,7 +1659,7 @@ mod real_impl {
     /// Mainly for one-shot test tools. Production paths use
     /// `prove_sharded_app_with_prover` with pre-built `AppExecutionInstances`
     /// + an externally-managed `ProverType`.
-    pub fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> {
+    pub fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Option<Vec<ProofResult>>> {
         let artifact_store =
             ArtifactStore::global().ok_or_else(|| eyre::eyre!("Artifact store not initialized"))?;
         let edge_artifacts = artifact_store
@@ -1668,7 +1699,7 @@ pub use real_impl::{
 };
 
 #[cfg(not(feature = "mock-provers"))]
-fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> {
+fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Option<Vec<ProofResult>>> {
     real_impl::prove_sharded_app_impl(job)
 }
 
@@ -1724,6 +1755,7 @@ mod tests {
                 assert_eq!(app_proof_count, 4, "Expected 4 app proofs");
             }
             ProverResult::Error(e) => panic!("Unexpected error: {}", e),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 
@@ -1769,6 +1801,7 @@ mod tests {
                 assert_eq!(segment_indices, vec![1, 5, 9, 13]);
             }
             ProverResult::Error(e) => panic!("Unexpected error: {}", e),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 }

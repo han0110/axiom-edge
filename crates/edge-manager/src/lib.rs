@@ -6,6 +6,7 @@
 pub mod config;
 pub mod handlers;
 pub mod lifecycle;
+pub mod loadout;
 pub mod otel_metrics;
 pub mod priority_queue;
 pub mod proof_state;

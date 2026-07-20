@@ -5,13 +5,13 @@
 A proof request identifies:
 
 - `proof_uuid`: caller-provided proof ID
-- `program`: `{name, version}` selecting one entry from the deployment loadout (`EDGE_PROGRAMS`). Optional only when exactly one program is loaded.
+- `program`: `{name, version}` selecting one entry from the deployment loadout. Optional only when exactly one program is loaded.
 - `labels`: optional opaque key/value metadata, forwarded to lifecycle webhooks and metrics (a caller might set, e.g., `block_number` or `batch_id` — the edge never interprets them)
 - input bytes: uploaded before `/start_proof` (to the manager, or pre-uploaded to the workers) — see [Input Upload](#input-upload); not a field on the request
 
 ## Programs and loadout
 
-A deployment declares a fixed set of programs via the `EDGE_PROGRAMS` env var — a JSON array of `{name, version}` objects parsed once at startup by both the manager and every worker. The manager rejects `/start_proof` requests for programs outside this loadout, and rejects worker registrations whose `loaded_programs` don't match.
+A deployment's loadout is populated at runtime. A client posts a guest ELF, plus the VM config to build it under, to `/register_program`, and the manager fans that registration out to every worker and replays it to workers that register later. The `EDGE_PROGRAMS` env var, a JSON array of `{name, version}` objects parsed at startup by both the manager and every worker, optionally seeds the loadout with programs whose artifacts are already staged on the workers' disks. The manager rejects `/start_proof` requests for programs outside the loadout.
 
 ## Artifacts
 

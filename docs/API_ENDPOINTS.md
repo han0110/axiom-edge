@@ -21,7 +21,7 @@ Start a new Edge proof request. This is the main entry point for clients.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `proof_uuid` | string | Yes | Unique identifier for this proof |
-| `program` | object `{name: string, version: u32}` | Conditional | Target program from the deployment loadout (`EDGE_PROGRAMS`). **Optional only when exactly one program is loaded** (the sole program is used). Required when 2+ programs are loaded. |
+| `program` | object `{name: string, version: u32}` | Conditional | Target program from the deployment loadout. **Optional only when exactly one program is loaded** (the sole program is used). Required otherwise. |
 | `proof_type` | string: `"stark"` (default) or `"evm"` | No | Requested final proof artifact. `"stark"` stops at the final internal (recursion) proof. `"evm"` appends the root → halo2 wrapping stage and yields an on-chain-verifiable proof — requires workers built with the `evm-prove` feature and a mounted halo2 proving key. |
 | `labels` | object (string→string) | No | Opaque, deployment-defined key/value metadata. The edge never interprets it — forwarded in lifecycle webhook events and emitted as metric attributes for downstream integrations (a caller might set, e.g., `{"block_number": "24000000"}` or `{"batch_id": "…"}`). |
 | `input_already_uploaded` | bool | No | Selects the input transport. `false` (default) — **manager-staged (Flow 2)**: the caller uploads the bincode `StdIn` to the manager (`POST /upload_input/{proof_uuid}`) first, and the manager fans it out to the workers. `true` — **worker pre-uploaded (Flow 1)**: the caller pushed the input directly to every worker (e.g. `/upload_input_compact`) first, so the manager skips fan-out. There is no caller-supplied path; the worker always reads `/dev/shm/edge_{proof_uuid}/input.bin`. |
@@ -51,11 +51,11 @@ There is **no** deferral field on this request. Whether a proof is a deferral pr
 }
 ```
 
-- **400 Bad Request**: `program` omitted while the loadout holds 2+ programs
+- **400 Bad Request**: `program` omitted while the loadout holds anything other than exactly one program
 ```json
 {
   "error": "program_required",
-  "message": "Multiple programs loaded; specify `program: {name, version}` in the request",
+  "message": "Specify `program: {name, version}` in the request; the loadout does not hold exactly one program",
   "current_loadout": [{ "name": "program1", "version": 0 }, { "name": "program2", "version": 0 }]
 }
 ```
@@ -78,6 +78,7 @@ keyed by `proof_uuid`. Parts (all optional):
 | Part name | Contents |
 |---|---|
 | `input` | The bincode `StdIn` bytes (the main program input). |
+| `input_compact` | The compact bytes for one logical input element, as an alternative to `input`. Each worker wraps them into a `StdIn`, so a caller with no OpenVM types on hand can still stage input on the manager. Rejected at `/start_proof` for a deferral proof, whose artifacts need a real `StdIn` to insert into. |
 | `deferral_state_{i}` | Circuit `i`'s `DeferralState` (one per deferral circuit, contiguous `0..N`). Fanned out to every app worker at `/start_proof`. |
 | `deferral_input_{i}` | Circuit `i`'s `DeferralInput`. The manager **retains** it (never broadcasts) and pushes it just-in-time to the worker that produces the final internal proof. |
 
@@ -143,7 +144,7 @@ Register a worker with the manager. Workers call this on startup and periodicall
 | `max_leaf_provers` | usize | Yes | Concurrent leaf proofs this worker can run. |
 | `max_internal_provers` | usize | Yes | Concurrent internal proofs this worker can run. |
 | `worker_role` | string: `"full"` (default), `"stark_only"`, or `"evm_dedicated"` | No | Deployment role. `full` runs every step; `stark_only` runs app/leaf/internal but no EVM step; `evm_dedicated` runs **only** the dispatched EVM step (must report zero app/leaf/internal capacity). Only the dedicated-halo2 deployment mode uses non-default roles. |
-| `loaded_programs` | array of `{name, version}` | No | Programs this worker has loaded vmexes for. The manager compares this against its own `EDGE_PROGRAMS` loadout and **rejects registration on mismatch** (both sides parse the same env value, so a mismatch signals a misconfigured container). |
+| `loaded_programs` | array of `{name, version}` | No | Programs this worker has loaded vmexes for. Advisory. The manager pushes every registered program absent from this list to the worker, so a late-joining or restarted worker converges on the current loadout without operator action. |
 
 **Response:**
 
@@ -155,13 +156,82 @@ Register a worker with the manager. Workers call this on startup and periodicall
 }
 ```
 
-- **400 Bad Request**: Registration failed (e.g. `program_set_mismatch` when `loaded_programs` ≠ manager loadout, or a worker_id↔URL conflict)
+- **400 Bad Request**: Registration failed (e.g. a worker_id↔URL conflict)
+
+---
+
+### POST `/register_program`
+
+Register a guest program with the deployment. The manager retains the payload
+and pushes it to every registered worker, each of which answers with the
+verifying key it derived. Those keys must agree, and the agreed one is cached
+for `GET /program_vk/{name}/{version}`. Body limit is disabled (the ELF can be
+large).
+
+**Request Body (`multipart/form-data`):**
+
+| Part name | Contents |
+|---|---|
+| `program` | JSON `{name, version}` this program is registered under. |
+| `elf` | Raw guest ELF bytes. |
+| `vm_config` | Serialized `SdkVmConfig`, opaque to the manager. |
+
+Workers ahead-of-time compile the guest after answering, so a successful
+registration does not mean the deployment can prove yet. `/start_proof` waits
+for that compile and answers 503 if it takes longer than two minutes.
+
+**Response:**
+
+- **202 Accepted**: Pushed to every registered worker
+```json
+{
+  "status": "registering",
+  "program": { "name": "program1", "version": 0 },
+  "num_workers": 4
+}
+```
+
+- **200 OK**: Identical program, ELF, and config are already registered
+```json
+{
+  "status": "unchanged",
+  "program": { "name": "program1", "version": 0 }
+}
+```
+
+- **400 Bad Request**: Malformed multipart body, an unexpected part, or a `missing_part`
+- **409 Conflict**: `program_already_registered`, this `{name, version}` already holds different bytes
+- **500 Internal Server Error**: `program_vk_mismatch`, workers derived different verifying keys
+- **502 Bad Gateway**: `worker_rejected_program`, a worker was unreachable or refused the push
+- **503 Service Unavailable**: `no_workers_registered`
+
+A registration that fails is rolled back out of the loadout, so a retry starts
+clean.
+
+---
+
+### GET `/program_vk/{name}/{version}`
+
+Return the verification baseline the workers derived for a registered program.
+This reads cached state, so it neither reaches out to a worker nor gates on
+readiness. A client holding the key still cannot prove with it until every
+worker has finished its AOT compile.
+
+**Path Parameters:**
+- `name`: The program name
+- `version`: The program version
+
+**Response:**
+
+- **200 OK**: bincode `verify_stark::VerificationBaseline` (`application/octet-stream`)
+- **404 Not Found**: `program_vk_unknown`, no worker has reported a key for this program
+- **500 Internal Server Error**: `program_vk_mismatch`, workers disagree on the key
 
 ---
 
 ### GET `/loadout`
 
-Return the manager's canonical program loadout (parsed once at startup from `EDGE_PROGRAMS`).
+Return the manager's current program loadout, seeded from `EDGE_PROGRAMS` and extended by `/register_program`.
 
 **Response (JSON):**
 
@@ -251,6 +321,26 @@ Get the current state of a proof.
 
 ---
 
+### GET `/final_proof/{proof_uuid}`
+
+Return the bytes of a completed STARK proof, decompressed whether or not the
+deployment set `proof.compress_persisted_final_proofs`. The path is derived
+from `proof.persist_final_proofs_dir` rather than from proof state, so a proof
+stays fetchable after its terminal state is evicted.
+
+**Path Parameters:**
+- `proof_uuid`: The proof identifier
+
+**Response:**
+
+- **200 OK**: openvm-codec-encoded `verify_stark::VmStarkProof` (`application/octet-stream`)
+- **400 Bad Request**: Invalid `proof_uuid`
+- **404 Not Found**: `final_proof_not_found`
+- **409 Conflict**: `final_proofs_not_persisted`, the deployment configured no `proof.persist_final_proofs_dir`
+- **500 Internal Server Error**: `final_proof_unreadable`
+
+---
+
 ### GET `/proof_debug/{proof_uuid}`
 
 Get scheduler-side per-worker debug state for an in-progress proof.
@@ -326,6 +416,37 @@ Health check endpoint.
 ---
 
 ## Edge Worker Endpoints (Port 8001+)
+
+### POST `/register_program`
+
+Load a guest program into this worker. Called by the manager when it fans out a
+`/register_program` request, and when it replays the loadout to a worker that
+has just registered.
+
+**Request Body:** Bincode-serialized `RegisterProgramRequest`
+
+```rust
+struct RegisterProgramRequest {
+    program: ProgramRef,
+    elf: Vec<u8>,
+    vm_config: String,  // serialized SdkVmConfig
+}
+```
+
+The worker transpiles the ELF into a `VmExe`, runs app and aggregation keygen
+against `vm_config`, and answers once the verifying key is derived. The AOT
+compile and GPU prover preload continue after the response, so `/readyz` is
+what reports when the program is servable. The first registration pins the
+worker's VM config, so serving a different config takes a restart rather than
+another registration.
+
+**Response:**
+
+- **200 OK**: bincode `verify_stark::VerificationBaseline` (`application/octet-stream`), empty on a mock build, which derives no keys
+- **400 Bad Request**: Undeserializable body or a `vm_config` that is not a valid `SdkVmConfig`
+- **409 Conflict**: Incompatible with what this worker already serves
+
+---
 
 ### POST `/upload_input/{proof_uuid}`
 
@@ -515,7 +636,10 @@ Health check endpoint with worker status.
 
 ### GET `/readyz`
 
-Readiness check endpoint (artifacts loaded).
+Readiness check endpoint (artifacts loaded). `programs` lists what this worker
+serves, which the manager checks the target program against before dispatching,
+since a worker can be ready in general while missing a program whose push never
+reached it.
 
 **Response:**
 
@@ -523,7 +647,8 @@ Readiness check endpoint (artifacts loaded).
 ```json
 {
   "ready": true,
-  "message": "Worker is ready"
+  "message": "Worker is ready",
+  "programs": [{ "name": "program1", "version": 0 }]
 }
 ```
 
@@ -531,7 +656,8 @@ Readiness check endpoint (artifacts loaded).
 ```json
 {
   "ready": false,
-  "message": "Artifacts not loaded"
+  "message": "Artifacts not loaded",
+  "programs": []
 }
 ```
 

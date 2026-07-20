@@ -50,8 +50,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - RUST_BACKTRACE=1
       - JEMALLOC_SYS_WITH_MALLOC_CONF={{ jemalloc }}
-      # Program loadout. Same value as the manager container; consistency
-      # is checked at /register_worker.
+      # Program loadout. Same value as the manager container.
       - EDGE_PROGRAMS=${EDGE_PROGRAMS:-}
       # VPMM_* are read by openvm-cuda-common at runtime. Values come from
       # the [cuda] section of config/templates/worker.toml.j2.

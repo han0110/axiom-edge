@@ -4,25 +4,29 @@ use axum::{
     body::Bytes,
     extract::{Multipart, Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::config::ManagerConfig;
 use crate::lifecycle::LifecycleReporter;
+use crate::loadout::{Baseline, InsertOutcome, Loadout};
 use crate::proof_state::{ProofResultEnvelopeOutcome, ProofState, ProofStatus};
 use crate::scheduler::{AssignedWork, EdgeStateStore};
 use crate::worker_registry::{app_eligible_workers, EdgeWorkerRegistry, RegisteredWorker};
 use protocol::{
     GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef, ProofContext, ProofResult,
-    RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest, StartProofRequest, Step,
-    WithProofContext,
+    RegisterProgramRequest, RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest,
+    StartProofRequest, Step, WithProofContext,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 /// (manager-staged) input bytes, uploaded to the manager by `proof_uuid`
 /// via `/upload_input`, `/upload_deferral_state`, and `/upload_deferral_input`
@@ -38,8 +42,15 @@ use std::collections::{BTreeMap, HashSet};
 /// Deferral maps are keyed by circuit index so uploads may arrive in any order.
 #[derive(Default)]
 pub struct StagedInputs {
-    /// bincode `StdIn` bytes for the main program input.
+    /// The main program input, either a bincode `StdIn` or the compact bytes
+    /// for a single logical input element (see [`Self::main_is_compact`]).
     pub main: Option<Bytes>,
+    /// Whether `main` holds compact guest bytes rather than a bincode `StdIn`.
+    /// Compact input is fanned out to the workers' `/upload_input_compact`,
+    /// which wraps it into a `StdIn` worker-side. This lets a caller that has
+    /// no OpenVM types on hand stage input on the manager, so it never needs
+    /// to reach the workers itself.
+    pub main_is_compact: bool,
     /// `DeferralState` bytes per circuit index.
     pub deferral_states: BTreeMap<usize, Bytes>,
     /// `DeferralInput` bytes per circuit index (retained until JIT dispatch).
@@ -70,20 +81,13 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// HTTP client for large uploads (5 minute timeout)
     pub upload_client: reqwest::Client,
-    /// Canonical program loadout, parsed once at startup from
-    /// `EDGE_PROGRAMS`. Two representations of the same data:
+    /// Programs this deployment serves. Populated at runtime by
+    /// `/register_program`, and optionally seeded from `EDGE_PROGRAMS` for a
+    /// deployment whose artifacts are already staged on the workers' disks.
     ///
-    /// - `programs` (Vec) preserves operator-supplied order, used in
-    ///   API responses (`/loadout`, 409 body) and log lines where stable
-    ///   order matters.
-    /// - `programs_set` (HashSet) is used for the two set-ops we do:
-    ///   `/start_proof` membership check and `/register_worker`
-    ///   loadout-equality check.
-    ///
-    /// At 3–5 entries either alone would be fine; carrying both keeps
-    /// every call site terse without a `.collect()` on the read path.
-    pub programs: Vec<ProgramRef>,
-    pub programs_set: HashSet<ProgramRef>,
+    /// Guarded by a plain `RwLock` because every critical section is a short
+    /// in-memory read or insert with no await inside.
+    pub loadout: RwLock<Loadout>,
     /// Input bytes uploaded to the manager, keyed by `proof_uuid`.
     /// Populated by the `/upload_input*` endpoints, drained by `start_proof`
     /// (main + deferral states) and the final-internal JIT dispatch
@@ -97,7 +101,6 @@ impl AppState {
         let worker_registry =
             EdgeWorkerRegistry::new(config.server.num_workers, config.provers.clone());
         let state_store = EdgeStateStore::new(config.provers.max_leaf_provers);
-        let programs_set: HashSet<ProgramRef> = programs.iter().cloned().collect();
         Self {
             config,
             worker_registry,
@@ -119,8 +122,7 @@ impl AppState {
                 .connect_timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to create upload HTTP client"),
-            programs,
-            programs_set,
+            loadout: RwLock::new(Loadout::seeded(programs)),
             staged_inputs: DashMap::new(),
         }
     }
@@ -155,6 +157,8 @@ fn validate_manager_proof_uuid(proof_uuid: &str) -> Result<(), &'static str> {
 ///
 /// Parts (all optional):
 /// - `input` — the bincode `StdIn` bytes (the main program input).
+/// - `input_compact` — the compact bytes for one logical input element, as an
+///   alternative to `input`. The workers wrap them into a `StdIn`.
 /// - `deferral_state_{i}` / `deferral_input_{i}` — one pair per deferral
 ///   circuit, at contiguous indices `0..N`. Omit entirely for a non-deferral
 ///   proof.
@@ -201,6 +205,10 @@ pub async fn upload_input(
 
         if name == "input" {
             staged.main = Some(bytes);
+            staged.main_is_compact = false;
+        } else if name == "input_compact" {
+            staged.main = Some(bytes);
+            staged.main_is_compact = true;
         } else if let Some(idx) = name.strip_prefix("deferral_state_") {
             match idx.parse::<usize>() {
                 Ok(i) => {
@@ -296,25 +304,11 @@ pub async fn register_worker(
         req.worker_role,
     );
 
-    // Consistency check: worker's loaded programs must match the manager's
-    // canonical loadout (both come from the same EDGE_PROGRAMS env). A
-    // mismatch means one container started with the wrong env — fail loud.
-    let actual: HashSet<ProgramRef> = req.loaded_programs.iter().cloned().collect();
-    if actual != state.programs_set {
-        error!(
-            "Worker {} program set mismatch. expected={:?}, actual={:?}",
-            req.worker_id, state.programs, req.loaded_programs
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "program_set_mismatch",
-                "message": "Worker loaded_programs does not match manager EDGE_PROGRAMS",
-                "expected": state.programs,
-                "actual": req.loaded_programs,
-            })),
-        );
-    }
+    // A worker no longer has to boot with the deployment's programs: it
+    // starts empty and the manager replays the loadout below. Its
+    // `loaded_programs` is therefore advisory, and only the programs it is
+    // still missing get pushed.
+    let already_loaded: Vec<ProgramRef> = req.loaded_programs.clone();
 
     let provers_config = crate::config::ProversConfig {
         max_app_provers: req.max_app_provers,
@@ -322,32 +316,507 @@ pub async fn register_worker(
         max_internal_provers: req.max_internal_provers,
     };
 
-    match state.worker_registry.register(
+    let worker_id = match state.worker_registry.register(
         &req.worker_url,
         req.worker_id,
         provers_config,
         req.worker_role,
     ) {
-        Ok(worker_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "worker_id": worker_id})),
-        ),
+        Ok(worker_id) => worker_id,
         Err(e) => {
             error!("Failed to register worker: {}", e);
-            (
+            return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": e.to_string()})),
+            );
+        }
+    };
+
+    // Bring the new worker up to the current loadout. A worker that joins an
+    // already-registered deployment converges without operator action, and a
+    // worker restart re-registers and reloads on its own.
+    let missing: Vec<_> = state
+        .loadout
+        .read()
+        .expect("loadout lock poisoned")
+        .replayable()
+        .into_iter()
+        .filter(|(program, _)| !already_loaded.contains(program))
+        .collect();
+    for (program, payload) in missing {
+        match push_program_to_worker(
+            &state,
+            &req.worker_url,
+            &program,
+            &payload.elf,
+            &payload.vm_config,
+        )
+        .await
+        {
+            // Worker registration itself succeeded, so report ok and let the
+            // 30 s re-registration retry the replay. A worker that rejected
+            // the push still reports itself ready, since it holds no record of
+            // the program, so a rejection here needs the operator's attention.
+            Err(e) => warn!("Failed to replay {program} to worker {worker_id}: {e}"),
+            Ok(None) => {}
+            Ok(Some(baseline)) => {
+                let agreed = state
+                    .loadout
+                    .write()
+                    .expect("loadout lock poisoned")
+                    .record_baseline(&program, baseline);
+                if !agreed {
+                    error!(
+                        "Worker {worker_id} derived a different verifying key for {program}; \
+                         the deployment is inconsistent"
+                    );
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "ok", "worker_id": worker_id})),
+    )
+}
+
+/// Return the current program loadout. The response shape is stable so an
+/// upstream orchestration layer can proxy it directly.
+pub async fn get_loadout(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(LoadoutResponse {
+        programs: state
+            .loadout
+            .read()
+            .expect("loadout lock poisoned")
+            .programs(),
+    })
+}
+
+/// Send one program to one worker and return the verifying key it derived.
+///
+/// The worker answers once keygen and the transpile are done, then AOT-compiles
+/// in the background, which is what its readiness reports on.
+///
+/// `None` means the worker derives no keys at all, which is a mock build. The
+/// cached baseline is left untouched in that case.
+async fn push_program_to_worker(
+    state: &AppState,
+    worker_url: &str,
+    program: &ProgramRef,
+    elf: &[u8],
+    vm_config: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let body = bincode::serialize(&RegisterProgramRequest {
+        program: program.clone(),
+        elf: elf.to_vec(),
+        vm_config: vm_config.to_string(),
+    })
+    .map_err(|e| format!("failed to encode registration: {e}"))?;
+
+    let resp = state
+        .upload_client
+        .post(format!("{worker_url}/register_program"))
+        .header("Content-Type", "application/octet-stream")
+        // The worker answers only once it has run keygen and the transpile,
+        // which scale with the guest, so this is the one caller that needs
+        // longer than the client's fan-out ceiling.
+        .timeout(std::time::Duration::from_secs(300))
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("{worker_url} unreachable: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "{worker_url} rejected registration: {status} {detail}"
+        ));
+    }
+
+    let baseline = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("{worker_url} returned an unreadable verifying key: {e}"))?;
+    Ok((!baseline.is_empty()).then(|| baseline.to_vec()))
+}
+
+/// `POST /register_program` — register a guest program with the deployment.
+///
+/// Multipart parts: `program` (JSON `ProgramRef`), `elf` (raw bytes), and
+/// `vm_config` (serialized `SdkVmConfig`). The manager retains the payload and
+/// pushes it to every registered worker, each of which answers with the
+/// verifying key it derived. Those keys must agree, and the agreed one is
+/// cached for `GET /program_vk/{name}/{version}`.
+///
+/// The workers still have to ahead-of-time compile the guest after answering,
+/// so a successful registration does not mean the deployment can prove yet.
+/// `/start_proof` waits for them and answers 503 once its retries are spent,
+/// leaving the caller to retry.
+pub async fn register_program(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut program: Option<ProgramRef> = None;
+    let mut elf: Option<Vec<u8>> = None;
+    let mut vm_config: Option<String> = None;
+
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Malformed multipart body: {e}")})),
+                );
+            }
+        };
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            RegisterProgramRequest::PART_PROGRAM => {
+                let raw = match field.text().await {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                serde_json::json!({"error": format!("Unreadable `program` part: {e}")}),
+                            ),
+                        );
+                    }
+                };
+                match serde_json::from_str(&raw) {
+                    Ok(parsed) => program = Some(parsed),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                serde_json::json!({"error": format!("Invalid `program` part: {e}")}),
+                            ),
+                        );
+                    }
+                }
+            }
+            RegisterProgramRequest::PART_ELF => match field.bytes().await {
+                Ok(bytes) => elf = Some(bytes.to_vec()),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("Unreadable `elf` part: {e}")})),
+                    );
+                }
+            },
+            RegisterProgramRequest::PART_VM_CONFIG => match field.text().await {
+                Ok(text) => vm_config = Some(text),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": format!("Unreadable `vm_config` part: {e}")}),
+                        ),
+                    );
+                }
+            },
+            other => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Unexpected part `{other}`")})),
+                );
+            }
+        }
+    }
+
+    let (program, elf, vm_config) = match (program, elf, vm_config) {
+        (Some(p), Some(e), Some(c)) => (p, Arc::new(e), Arc::new(c)),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "missing_part",
+                    "message": "register_program requires the `program`, `elf`, and `vm_config` parts",
+                })),
+            );
+        }
+    };
+
+    let outcome = state
+        .loadout
+        .write()
+        .expect("loadout lock poisoned")
+        .insert(program.clone(), elf.clone(), vm_config.clone());
+
+    let inserted = match outcome {
+        // Classified and reset under one write lock, so a concurrent identical
+        // registration cannot have its freshly agreed key reset from under it.
+        InsertOutcome::Unchanged => {
+            let mut loadout = state.loadout.write().expect("loadout lock poisoned");
+            if matches!(loadout.baseline(&program), Baseline::Agreed(_)) {
+                debug!("Program {program} already registered with identical bytes");
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "unchanged", "program": program})),
+                );
+            }
+            // Re-push when the workers never agreed on a key, which is the only
+            // way out of a poisoned baseline. The workers treat an identical
+            // re-registration as a no-op, so this costs nothing when it is a
+            // retry of something that already succeeded.
+            loadout.reset_baseline(&program);
+            false
+        }
+        InsertOutcome::Conflict => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "program_already_registered",
+                    "message": format!("{program} cannot be registered over what is already loaded"),
+                })),
+            );
+        }
+        InsertOutcome::Inserted => true,
+    };
+
+    let workers = state.worker_registry.get_status().workers;
+    if workers.is_empty() {
+        return fail_registration(
+            &state,
+            &program,
+            inserted,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_workers_registered",
+            "No workers are registered to receive the program".to_string(),
+        );
+    }
+
+    info!(
+        "Registering {program} with {} worker(s) ({} ELF bytes)",
+        workers.len(),
+        elf.len()
+    );
+    // Pushed concurrently, since each push waits out that worker's keygen and
+    // a sequential fan-out would sum them.
+    let pushes = futures::future::join_all(workers.iter().map(|(_, worker)| {
+        push_program_to_worker(&state, &worker.worker_url, &program, &elf, &vm_config)
+    }))
+    .await;
+
+    for push in pushes {
+        match push {
+            // Only a mock build, which derives no keys at all.
+            Ok(None) => {}
+            Ok(Some(baseline)) => {
+                let agreed = state
+                    .loadout
+                    .write()
+                    .expect("loadout lock poisoned")
+                    .record_baseline(&program, baseline);
+                if !agreed {
+                    return fail_registration(
+                        &state,
+                        &program,
+                        inserted,
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "program_vk_mismatch",
+                        format!("Workers disagree on the verifying key for {program}"),
+                    );
+                }
+            }
+            Err(e) => {
+                return fail_registration(
+                    &state,
+                    &program,
+                    inserted,
+                    StatusCode::BAD_GATEWAY,
+                    "worker_rejected_program",
+                    e,
+                )
+            }
+        }
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "registering",
+            "program": program,
+            "num_workers": workers.len(),
+        })),
+    )
+}
+
+/// `GET /program_vk/{name}/{version}` — the program's verification baseline.
+///
+/// The key the workers reported when the program was pushed to them, released
+/// only once every stark-proving worker is ready and serves the program. The
+/// baseline itself exists before the AOT compile ends, but handing it out
+/// earlier would let a client submit a proof that then parks at the
+/// `/start_proof` readiness gate, so registration is complete exactly when
+/// this endpoint answers 200 and the first proof starts unhindered.
+pub async fn program_vk(
+    State(state): State<Arc<AppState>>,
+    Path((name, version)): Path<(String, u32)>,
+) -> impl IntoResponse {
+    let program = ProgramRef::new(name, version);
+    let baseline = state
+        .loadout
+        .read()
+        .expect("loadout lock poisoned")
+        .baseline(&program);
+    match baseline {
+        Baseline::Agreed(baseline) => {
+            if let Err(message) =
+                get_ready_workers(&state, 1, std::time::Duration::from_secs(0), Some(&program))
+                    .await
+            {
+                return (
+                    StatusCode::NOT_FOUND,
+                    [("Content-Type", "application/json")],
+                    serde_json::to_vec(&serde_json::json!({
+                        "error": "program_preparing",
+                        "message": format!(
+                            "{program} is registered but not yet servable: {message}"
+                        ),
+                    }))
+                    .unwrap_or_default(),
+                );
+            }
+            (
+                StatusCode::OK,
+                [("Content-Type", "application/octet-stream")],
+                baseline.to_vec(),
+            )
+        }
+        Baseline::Unknown => (
+            StatusCode::NOT_FOUND,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "error": "program_vk_unknown",
+                "message": format!("No worker has reported a verifying key for {program}"),
+            }))
+            .unwrap_or_default(),
+        ),
+        Baseline::Mismatch => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "error": "program_vk_mismatch",
+                "message": format!("Workers disagree on the verifying key for {program}"),
+            }))
+            .unwrap_or_default(),
+        ),
+    }
+}
+
+/// Report a failed registration, rolling the program back out of the loadout
+/// when this request is what put it there, so a retry starts clean rather than
+/// seeing a program the workers never fully accepted. A failed re-registration
+/// leaves the existing entry alone, since the workers still serve it.
+fn fail_registration(
+    state: &AppState,
+    program: &ProgramRef,
+    inserted: bool,
+    status: StatusCode,
+    error: &str,
+    message: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if inserted {
+        state
+            .loadout
+            .write()
+            .expect("loadout lock poisoned")
+            .remove(program);
+    }
+    error!("Failed to register {program}: {message}");
+    (
+        status,
+        Json(serde_json::json!({"error": error, "message": message})),
+    )
+}
+
+/// `GET /final_proof/{proof_uuid}` — the completed proof's bytes.
+///
+/// Reads the proof the manager persisted for `proof_uuid` and returns it
+/// decompressed, so a caller never has to know whether the deployment enabled
+/// `compress_persisted_final_proofs`. The path is derived from config rather
+/// than from proof state, so the proof stays fetchable after its terminal
+/// state is evicted.
+pub async fn final_proof(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> impl IntoResponse {
+    if let Err(reason) = validate_manager_proof_uuid(&proof_uuid) {
+        return (
+            StatusCode::BAD_REQUEST,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "error": format!("Invalid proof_uuid: {reason}"),
+            }))
+            .unwrap_or_default(),
+        );
+    }
+
+    let Some(dir) = state.config.proof.persist_final_proofs_dir.as_ref() else {
+        return (
+            StatusCode::CONFLICT,
+            [("Content-Type", "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "error": "final_proofs_not_persisted",
+                "message": "This deployment has no `proof.persist_final_proofs_dir` configured",
+            }))
+            .unwrap_or_default(),
+        );
+    };
+
+    let path = dir.join(format!("{proof_uuid}.proof.bin"));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            debug!("No persisted final proof at {}: {e}", path.display());
+            return (
+                StatusCode::NOT_FOUND,
+                [("Content-Type", "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "error": "final_proof_not_found",
+                    "message": format!("No final proof for {proof_uuid}"),
+                }))
+                .unwrap_or_default(),
+            );
+        }
+    };
+
+    match decompress_final_proof(bytes) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [("Content-Type", "application/octet-stream")],
+            bytes,
+        ),
+        Err(e) => {
+            error!("Failed to decompress {}: {e}", path.display());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("Content-Type", "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "error": "final_proof_unreadable",
+                    "message": e,
+                }))
+                .unwrap_or_default(),
             )
         }
     }
 }
 
-/// Return the canonical program loadout. The response shape is stable so an
-/// upstream orchestration layer can proxy it directly.
-pub async fn get_loadout(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(LoadoutResponse {
-        programs: state.programs.clone(),
-    })
+/// zstd frame magic, as written by `compress_persisted_final_proofs`.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// Decompress a persisted final proof when it carries a zstd frame, and pass
+/// it through untouched otherwise.
+fn decompress_final_proof(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if bytes.len() < ZSTD_MAGIC.len() || bytes[..ZSTD_MAGIC.len()] != ZSTD_MAGIC {
+        return Ok(bytes);
+    }
+    zstd::decode_all(&bytes[..]).map_err(|e| e.to_string())
 }
 
 /// Get registered Edge workers.
@@ -356,19 +825,49 @@ pub async fn list_workers(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Json(status)
 }
 
+/// Wait for every worker to report ready, and when `program` is given, for
+/// each worker that runs the program to report that it holds it.
+///
+/// A worker can be ready in general while missing one program, since a push it
+/// rejected or never received leaves no trace on it. Probing for the program
+/// rather than trusting the worker's last registration keeps the answer as
+/// fresh as the probe. Only stark-proving roles are asked, because the EVM
+/// step verifies by key and never loads the program.
+///
+/// Each retry costs the HTTP client's timeout plus `retry_delay`, and workers
+/// are walked in order, so the ceiling is well above `max_retries * retry_delay`
+/// when workers are unreachable rather than merely busy.
 async fn probe_worker_health(
     state: &AppState,
     workers: &[(usize, RegisteredWorker)],
     max_retries: usize,
     retry_delay: std::time::Duration,
+    program: Option<&ProgramRef>,
 ) -> Result<(), String> {
     for (worker_id, worker) in workers {
         let url = format!("{}/readyz", worker.worker_url);
+        let program = program.filter(|_| worker.worker_role.runs_stark_proving());
         let mut retries = 0;
 
         loop {
             match state.http_client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => break,
+                Ok(resp) if resp.status().is_success() => {
+                    let Some(program) = program else { break };
+                    if worker_serves(resp, program).await {
+                        break;
+                    }
+                    retries += 1;
+                    if retries >= max_retries {
+                        return Err(format!(
+                            "Worker {} at {} does not report serving {}",
+                            worker_id, worker.worker_url, program
+                        ));
+                    }
+                    if retries == 1 {
+                        info!("Waiting for worker {worker_id} to load {program}...");
+                    }
+                    tokio::time::sleep(retry_delay).await;
+                }
                 Ok(resp) => {
                     retries += 1;
                     if retries >= max_retries {
@@ -404,23 +903,39 @@ async fn probe_worker_health(
     Ok(())
 }
 
+/// Whether a worker's readiness response lists `program`. A response the
+/// manager cannot read reports nothing, so the caller retries rather than
+/// dispatching on a guess.
+async fn worker_serves(resp: reqwest::Response, program: &ProgramRef) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ReadyPrograms {
+        #[serde(default)]
+        programs: Vec<ProgramRef>,
+    }
+
+    resp.json::<ReadyPrograms>()
+        .await
+        .is_ok_and(|ready| ready.programs.contains(program))
+}
+
 async fn get_ready_workers(
     state: &AppState,
     max_retries: usize,
     retry_delay: std::time::Duration,
+    program: Option<&ProgramRef>,
 ) -> Result<Vec<(usize, RegisteredWorker)>, String> {
     let workers = state
         .worker_registry
         .ready_workers()
         .map_err(|e| e.to_string())?;
-    probe_worker_health(state, &workers, max_retries, retry_delay).await?;
+    probe_worker_health(state, &workers, max_retries, retry_delay, program).await?;
     Ok(workers)
 }
 
 /// Return the worker list only when the full registered stack is ready.
 pub async fn readyz_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let expected_num_workers = state.worker_registry.expected_worker_count();
-    match get_ready_workers(&state, 1, std::time::Duration::from_secs(0)).await {
+    match get_ready_workers(&state, 1, std::time::Duration::from_secs(0), None).await {
         Ok(workers) => (
             StatusCode::OK,
             Json(EdgeReadyResponse {
@@ -467,42 +982,45 @@ pub async fn start_proof(
     // whether explicit or inferred — the 409 body carries a stable,
     // machine-readable `error` code (`program_not_in_loadout`) so an
     // upstream layer can forward it straight to the user.
-    let program = match req.program.clone() {
-        Some(p) => {
-            if !state.programs_set.contains(&p) {
-                warn!(
-                    "Rejecting proof {}: program {} not in loadout",
-                    req.proof_uuid, p
-                );
-                return (
-                    StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "program_not_in_loadout",
-                        "message": format!("Program {} is not in the current loadout", p),
-                        "current_loadout": state.programs,
-                    })),
-                );
+    let program = {
+        let loadout = state.loadout.read().expect("loadout lock poisoned");
+        match req.program.clone() {
+            Some(p) => {
+                if !loadout.contains(&p) {
+                    warn!(
+                        "Rejecting proof {}: program {} not in loadout",
+                        req.proof_uuid, p
+                    );
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": "program_not_in_loadout",
+                            "message": format!("Program {} is not in the current loadout", p),
+                            "current_loadout": loadout.programs(),
+                        })),
+                    );
+                }
+                p
             }
-            p
+            None => match loadout.sole() {
+                Some(only) => only,
+                None => {
+                    warn!(
+                        "Rejecting proof {}: `program` omitted but loadout has {} programs",
+                        req.proof_uuid,
+                        loadout.len()
+                    );
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "program_required",
+                            "message": "Specify `program: {name, version}` in the request; the loadout does not hold exactly one program",
+                            "current_loadout": loadout.programs(),
+                        })),
+                    );
+                }
+            },
         }
-        None => match state.programs.as_slice() {
-            [only] => only.clone(),
-            _ => {
-                warn!(
-                    "Rejecting proof {}: `program` omitted but loadout has {} programs",
-                    req.proof_uuid,
-                    state.programs.len()
-                );
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "error": "program_required",
-                        "message": "Multiple programs loaded; specify `program: {name, version}` in the request",
-                        "current_loadout": state.programs,
-                    })),
-                );
-            }
-        },
     };
 
     info!(
@@ -510,8 +1028,17 @@ pub async fn start_proof(
         req.proof_uuid, program
     );
 
-    // Check if workers are registered
-    let workers = match get_ready_workers(&state, 60, std::time::Duration::from_secs(2)).await {
+    // Check if workers are registered, and that each holds the program this
+    // proof is for, so a worker a push never reached is waited for rather than
+    // dispatched to.
+    let workers = match get_ready_workers(
+        &state,
+        60,
+        std::time::Duration::from_secs(2),
+        Some(&program),
+    )
+    .await
+    {
         Ok(w) => w,
         Err(e) => {
             error!("Workers not ready: {}", e);
@@ -663,6 +1190,19 @@ pub async fn start_proof(
         .await;
     }
 
+    // Deferral artifacts are inserted into a `StdIn` before execution, so they
+    // cannot ride the compact transport, which has no `StdIn` to insert into.
+    if staged.main_is_compact && num_deferral_circuits > 0 {
+        return abort_proof_with_failure(
+            &state,
+            &proof_uuid,
+            "Compact input is incompatible with deferral. Stage the input as a \
+             bincode `StdIn` via the `input` part instead."
+                .to_string(),
+        )
+        .await;
+    }
+
     // Deferral is manager-staged only: it can't ride the worker-pre-uploaded
     // (Flow 1) transport.
     if req.input_already_uploaded && num_deferral_circuits > 0 {
@@ -676,6 +1216,7 @@ pub async fn start_proof(
         .await;
     }
 
+    let main_is_compact = staged.main_is_compact;
     let input_data: Option<Vec<u8>> = if req.input_already_uploaded {
         info!(
             "Proof {} uses worker-pre-uploaded input (Flow 1); manager skips fan-out",
@@ -700,7 +1241,13 @@ pub async fn start_proof(
         }
     };
 
-    // First, upload input to all workers if the manager holds it.
+    // First, upload input to all workers if the manager holds it. Compact
+    // bytes go to the worker endpoint that wraps them into a `StdIn`.
+    let input_endpoint = if main_is_compact {
+        "upload_input_compact"
+    } else {
+        "upload_input"
+    };
     if let Some(ref data) = input_data {
         let mut upload_handles = vec![];
         for (worker_id, worker) in &workers {
@@ -718,7 +1265,7 @@ pub async fn start_proof(
 
                 loop {
                     // proof_uuid rides in the URL path; body is the raw input.
-                    let url = format!("{}/upload_input/{}", worker_url, proof_uuid_clone);
+                    let url = format!("{worker_url}/{input_endpoint}/{proof_uuid_clone}");
                     let body = data_clone.clone();
 
                     match client
@@ -1224,6 +1771,58 @@ pub async fn proof_state(
     }
 }
 
+/// How often `/proof_events` rechecks a proof's status. It reads the status
+/// rather than every writer publishing to it, since it is written from a dozen
+/// places across the scheduler and the result handler.
+const PROOF_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `GET /proof_events/{proof_uuid}` — the proof's status as server-sent events.
+///
+/// Emits the current status on subscribe, then one event per change, and ends
+/// the stream once the status settles. Each event carries only the status, so
+/// a subscriber never has to poll `/proof_state`. Subscribing after a change
+/// still yields the current status, which makes a reconnect safe.
+pub async fn proof_events(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> Response {
+    let Some(proof) = state.proof_states.get(&proof_uuid).map(|s| s.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Proof not found"})),
+        )
+            .into_response();
+    };
+
+    Sse::new(status_events(proof))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Emits `proof`'s status on subscribe and again on every change, ending once
+/// it settles.
+fn status_events(
+    proof: Arc<Mutex<ProofState>>,
+) -> impl futures::Stream<Item = Result<Event, axum::Error>> {
+    async_stream::try_stream! {
+        let mut last: Option<ProofStatus> = None;
+        loop {
+            let current = {
+                let guard = proof.lock().await;
+                guard.status.clone()
+            };
+            if last.as_ref() != Some(&current) {
+                yield Event::default().event("status").json_data(&current)?;
+                if current.is_settled() {
+                    break;
+                }
+                last = Some(current);
+            }
+            tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL).await;
+        }
+    }
+}
+
 /// Get scheduler debug state for a proof.
 ///
 /// This endpoint is intended for diagnosing stalls. It exposes per-worker
@@ -1275,6 +1874,21 @@ pub async fn cancel_proof(
     // this proof (e.g. a deferral proof's retained DeferralInput).
     state.state_store.remove_proof(&req.proof_uuid);
     state.staged_inputs.remove(&req.proof_uuid);
+
+    // Tell the workers, or they run the jobs they already accepted to
+    // completion and hold their app provers against the next proof.
+    let workers = state.worker_registry.get_status().workers;
+    let proof_uuid = req.proof_uuid.as_str();
+    let client = &state.http_client;
+    futures::future::join_all(workers.iter().map(|(worker_id, worker)| {
+        let url = format!("{}/cancel_proof/{proof_uuid}", worker.worker_url);
+        async move {
+            if let Err(e) = client.post(url).send().await {
+                warn!("Failed to cancel {proof_uuid} on worker {worker_id}: {e}");
+            }
+        }
+    }))
+    .await;
 
     (
         StatusCode::OK,

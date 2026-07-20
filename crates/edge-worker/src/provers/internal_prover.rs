@@ -148,9 +148,9 @@ mod real_impl {
         pub fn new() -> Result<Self> {
             let artifact_store = ArtifactStore::global()
                 .ok_or_else(|| eyre::eyre!("Artifact store not initialized"))?;
-            let edge_artifacts = artifact_store
-                .get_edge_artifacts()
-                .ok_or_else(|| eyre::eyre!("Edge artifacts not loaded"))?;
+            // Parks on a registration-driven worker, which has no artifacts
+            // until the first `/register_program` publishes them.
+            let edge_artifacts = artifact_store.wait_for_edge_artifacts();
 
             // `Some(def_hook_cached_commit)` iff the worker is in
             // deferral mode. `EdgeArtifacts.agg_stark_pk` already points
@@ -455,6 +455,7 @@ mod tests {
                 }
             }
             ProverResult::Error(e) => panic!("Unexpected error: {}", e),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 
@@ -495,6 +496,7 @@ mod tests {
                 }
             }
             ProverResult::Error(e) => panic!("Unexpected error: {}", e),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 }

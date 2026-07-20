@@ -136,10 +136,10 @@ Three invariants across every host:
 - `--total-provers` = the **cluster-wide** GPU total, identical on every host.
 - `--id-offset` = the number of GPUs on all *earlier* hosts, so each host owns a
   contiguous block of prover IDs (the manager host uses the default `0`).
-- `--programs` must point at the **same loadout** everywhere — the manager
-  rejects a worker whose programs don't match its own. Each host regenerates its
-  own keys/vmexes from that loadout (deterministic, so they agree), so the
-  ELF(s) referenced by `programs.json` must exist on every host.
+- `--programs` must point at the **same loadout** everywhere, since the manager
+  dispatches a proof only to workers that serve its program. Each host
+  regenerates its own keys/vmexes from that loadout (deterministic, so they
+  agree), so the ELF(s) referenced by `programs.json` must exist on every host.
 
 Example — 2 machines × 4 GPUs (8 provers total), manager at `10.0.0.1`:
 

@@ -131,8 +131,8 @@ impl ResultClient {
 
     /// Register this worker with the manager.
     ///
-    /// Returns the confirmed worker ID. `loaded_programs` advertises what
-    /// the worker has loaded; the manager refuses registration on mismatch.
+    /// Returns the confirmed worker ID. `loaded_programs` advertises what the
+    /// worker holds, and the manager pushes back whatever is missing from it.
     // Arguments mirror the fields of `RegisterWorkerRequest` one-to-one; this
     // just builds that request and posts it, so the arg count tracks the wire
     // type rather than indicating a function that does too much.
@@ -219,7 +219,6 @@ pub async fn registration_task(
     max_app_provers: usize,
     max_leaf_provers: usize,
     max_internal_provers: usize,
-    loaded_programs: Vec<ProgramRef>,
     worker_role: protocol::WorkerRole,
     interval: Duration,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -240,7 +239,10 @@ pub async fn registration_task(
                         max_app_provers,
                         max_leaf_provers,
                         max_internal_provers,
-                        loaded_programs.clone(),
+                        // Report what this worker holds right now, not what it
+                        // booted with. A stale snapshot would make the manager
+                        // re-push every registered program on every tick.
+                        loaded_programs(),
                         worker_role,
                     )
                     .await
@@ -250,6 +252,13 @@ pub async fn registration_task(
             }
         }
     }
+}
+
+/// The programs this worker currently has artifacts for.
+fn loaded_programs() -> Vec<ProgramRef> {
+    crate::artifacts::ArtifactStore::global()
+        .map(|store| store.configured_programs())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

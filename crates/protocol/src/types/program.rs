@@ -4,10 +4,15 @@
 //! user-friendly string chosen at registration time; `version` bumps each
 //! time a new ELF is uploaded under the same name.
 //!
-//! The list of programs a deployment serves is operator-defined via the
-//! `EDGE_PROGRAMS` environment variable (JSON array). Both the manager
-//! and every worker parse the same env value on startup, so they agree
-//! on the canonical loadout from boot. See [`parse_programs_env`].
+//! A deployment's loadout is populated at runtime: a client calls
+//! `/register_program` with a guest ELF and the VM config to build it under,
+//! and the manager fans that registration out to every worker. See
+//! [`RegisterProgramRequest`].
+//!
+//! The `EDGE_PROGRAMS` environment variable (JSON array) optionally seeds the
+//! loadout with programs whose artifacts are already on disk. It is unset in a
+//! registration-driven deployment, in which case the loadout starts empty. See
+//! [`parse_programs_env`].
 
 use serde::{Deserialize, Serialize};
 
@@ -91,15 +96,47 @@ pub fn parse_programs_str(raw: &str) -> Result<Vec<ProgramRef>, ParseProgramsErr
     Ok(programs)
 }
 
-/// Parse `EDGE_PROGRAMS` directly from the process environment.
+/// Parse the loadout `EDGE_PROGRAMS` seeds the deployment with.
 ///
-/// Returns `Err(ParseProgramsError::Missing)` if the variable is unset
-/// or empty.
+/// An unset or empty variable yields an empty loadout, which is the normal
+/// case for a registration-driven deployment. A variable that is set but
+/// malformed is still an error, so a typo fails loud instead of silently
+/// starting with no programs.
 pub fn parse_programs_env() -> Result<Vec<ProgramRef>, ParseProgramsError> {
     match std::env::var(ENV_PROGRAMS) {
-        Ok(s) => parse_programs_str(&s),
-        Err(_) => Err(ParseProgramsError::Missing),
+        Ok(s) if !s.trim().is_empty() => parse_programs_str(&s),
+        _ => Ok(Vec::new()),
     }
+}
+
+/// `POST /register_program` — a guest program and the VM config to build it
+/// under, sent by a client to the manager and fanned out to every worker.
+///
+/// The worker derives everything else from these two fields: it transpiles
+/// `elf` into a `VmExe`, runs app and aggregation keygen against `vm_config`,
+/// and builds the program's execution instances. Nothing is staged on disk
+/// beforehand.
+///
+/// `vm_config` stays a JSON string rather than a typed value so this crate
+/// keeps its promise not to depend on OpenVM. Only the worker parses it, as
+/// an `SdkVmConfig`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RegisterProgramRequest {
+    /// Name and version this program is registered under.
+    pub program: ProgramRef,
+    /// Guest ELF bytes.
+    pub elf: Vec<u8>,
+    /// Serialized `SdkVmConfig`, opaque to the manager.
+    pub vm_config: String,
+}
+
+impl RegisterProgramRequest {
+    /// Multipart field carrying the JSON-encoded [`ProgramRef`].
+    pub const PART_PROGRAM: &'static str = "program";
+    /// Multipart field carrying the raw ELF bytes.
+    pub const PART_ELF: &'static str = "elf";
+    /// Multipart field carrying the serialized `SdkVmConfig`.
+    pub const PART_VM_CONFIG: &'static str = "vm_config";
 }
 
 #[cfg(test)]

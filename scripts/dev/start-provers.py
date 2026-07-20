@@ -1316,8 +1316,7 @@ def main() -> int:
     docker_env["OPENVM_REV"] = vcs_refs["openvm_rev"]
     docker_env["STARK_BACKEND_REV"] = vcs_refs["stark_rev"]
     # Inject the program loadout into every container. Same value reaches
-    # manager + workers; both parse it on startup and disagree loudly at
-    # /register_worker if they don't match.
+    # manager + workers, which both parse it on startup.
     docker_env["EDGE_PROGRAMS"] = programs_env_value(args.programs)
     if eff["toolchain"]:
         docker_env["TOOLCHAIN_VERSION"] = eff["toolchain"]

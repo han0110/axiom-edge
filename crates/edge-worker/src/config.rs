@@ -48,9 +48,9 @@ pub struct WorkerSettings {
 
 /// Artifacts configuration.
 ///
-/// Only the base path lives here. The deployment's program list comes
-/// from the `EDGE_PROGRAMS` env var, parsed by `protocol::parse_programs_env`,
-/// and is rendered by `start-provers.py` onto both manager and worker
+/// Only the base path lives here. The `EDGE_PROGRAMS` env var, parsed by
+/// `protocol::parse_programs_env`, optionally seeds the deployment's program
+/// list, and `start-provers.py` renders it onto both manager and worker
 /// containers.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ArtifactsConfig {

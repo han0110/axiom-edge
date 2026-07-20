@@ -48,14 +48,14 @@ pub use crate::provers::{Halo2ProverInstance, RootProverInstance};
 /// Shared context that every app worker reads from to lazily load a
 /// program's GPU prover on first use.
 ///
-/// Built once at worker boot from the deployment's loadout and held via
-/// `Arc<>` so all N app worker threads can look up
-/// `execution_instances[&ctx.program]` without contention.
+/// Built from the deployment's loadout and held via `Arc<>` so all N app
+/// worker threads can look up `execution_instances[&ctx.program]` without
+/// contention.
 #[cfg(not(feature = "mock-provers"))]
 pub struct AppWorkerContext {
     pub app_pk: Arc<sdk_v2::keygen::AppProvingKey<openvm_sdk_config::SdkVmConfig>>,
-    /// One entry per program in `EDGE_PROGRAMS`, pre-built at boot via
-    /// `AppExecutionInstances::new` (the expensive ~115 s AOT compile).
+    /// One entry per loaded program, built via `AppExecutionInstances::new`
+    /// (the expensive ~115 s AOT compile) at boot or at registration.
     pub execution_instances: HashMap<ProgramRef, Arc<AppExecutionInstances>>,
 }
 
@@ -82,6 +82,11 @@ pub enum AppProverJob {
         target_program: ProgramRef,
         f: crate::provers::SegmentConsumerFn,
     },
+    /// Builds the worker's GPU prover for a just registered program ahead of
+    /// its first job. Dispatched to every idle worker once the program's
+    /// artifacts are installed.
+    #[cfg(not(feature = "mock-provers"))]
+    Preload { target_program: ProgramRef },
 }
 
 impl AppProverJob {
@@ -90,7 +95,8 @@ impl AppProverJob {
         match self {
             AppProverJob::ShardedApp { target_program, .. }
             | AppProverJob::ParallelCoordinator { target_program, .. }
-            | AppProverJob::SegmentConsumer { target_program, .. } => target_program,
+            | AppProverJob::SegmentConsumer { target_program, .. }
+            | AppProverJob::Preload { target_program } => target_program,
         }
     }
 }
@@ -504,8 +510,13 @@ fn merge_parallel_app_results(
     coordinator_result: ProverResult,
     consumer_proofs: Vec<protocol::ProofResult>,
     consumer_errors: Vec<String>,
+    consumer_canceled: bool,
 ) -> ProverResult {
     match coordinator_result {
+        // Any canceled part leaves the segment set incomplete, so the job has
+        // nothing to report whatever the others did.
+        ProverResult::Canceled => ProverResult::Canceled,
+        _ if consumer_canceled => ProverResult::Canceled,
         ProverResult::Success(mut results) if consumer_errors.is_empty() => {
             results.extend(consumer_proofs);
             ProverResult::Success(results)
@@ -600,14 +611,13 @@ impl ProverPool {
             role, app_count, leaf_count, internal_count
         );
 
-        // App workers need the app-execution context. For a role that runs
-        // STARK proving, the caller supplies it (`Some`); `EvmDedicated` supplies
-        // `None` and gets no app workers.
+        // App workers need the app-execution context. A disk-seeded worker
+        // gets it from the caller (`Some`); a registration-driven one gets
+        // `None` and its workers wait for the store to publish it.
+        // `EvmDedicated` also passes `None`, but its `app_count` is 0 so no
+        // worker is spawned to wait.
         #[cfg(not(feature = "mock-provers"))]
-        let app_workers = match app_ctx {
-            Some(ctx) => Self::spawn_app_workers(app_count, ctx, worker_free.clone())?,
-            None => Vec::new(),
-        };
+        let app_workers = Self::spawn_app_workers(app_count, app_ctx, worker_free.clone())?;
         #[cfg(feature = "mock-provers")]
         let app_workers = Self::spawn_app_workers(app_count, worker_free.clone())?;
 
@@ -650,7 +660,7 @@ impl ProverPool {
     /// `ProverType` as jobs arrive (see `app_worker_loop`).
     fn spawn_app_workers(
         count: usize,
-        #[cfg(not(feature = "mock-provers"))] app_ctx: Arc<AppWorkerContext>,
+        #[cfg(not(feature = "mock-provers"))] app_ctx: Option<Arc<AppWorkerContext>>,
         worker_free: Arc<Notify>,
     ) -> Result<Vec<WorkerHandle<AppProverJob>>> {
         let mut workers = Vec::with_capacity(count);
@@ -754,7 +764,7 @@ impl ProverPool {
     #[cfg(not(feature = "mock-provers"))]
     fn app_worker_loop(
         name: &str,
-        app_ctx: Arc<AppWorkerContext>,
+        app_ctx: Option<Arc<AppWorkerContext>>,
         job_receiver: Receiver<(AppProverJob, oneshot::Sender<ProverResult>)>,
         is_busy: Arc<AtomicBool>,
         is_initialized: Arc<AtomicBool>,
@@ -763,6 +773,16 @@ impl ProverPool {
     ) {
         Self::set_thread_priority(name);
         info!("Worker {} starting (unloaded — lazy program load)", name);
+
+        // A registration-driven worker boots without a deployment, so park
+        // here until one is published. `is_initialized` stays false until
+        // then, which keeps /readyz false while the worker cannot prove.
+        let mut app_ctx = match app_ctx {
+            Some(ctx) => ctx,
+            None => crate::artifacts::ArtifactStore::global()
+                .expect("artifact store initialized before the prover pool")
+                .wait_for_app_worker_context(),
+        };
 
         // Worker is immediately "initialized" in the swap design — it
         // simply has no program loaded yet. /readyz gates on the
@@ -781,6 +801,16 @@ impl ProverPool {
                 recv(job_receiver) -> received => match received {
                     Ok((job, result_sender)) => {
                         is_busy.store(true, Ordering::SeqCst);
+
+                        // Pick up a deployment extended after this thread
+                        // started, so a program registered later is visible.
+                        if !app_ctx.execution_instances.contains_key(job.target_program()) {
+                            if let Some(extended) = crate::artifacts::ArtifactStore::global()
+                                .and_then(|store| store.app_worker_context())
+                            {
+                                app_ctx = extended;
+                            }
+                        }
 
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             Self::run_app_job(name, &app_ctx, &mut loaded, job)
@@ -923,6 +953,8 @@ impl ProverPool {
             }
             AppProverJob::ParallelCoordinator { f, .. } => f(&instances, prover),
             AppProverJob::SegmentConsumer { f, .. } => f(&instances, prover),
+            // The swap above is the whole job.
+            AppProverJob::Preload { .. } => ProverResult::Success(vec![]),
         }
     }
 
@@ -1158,10 +1190,12 @@ impl ProverPool {
 
         let mut consumer_proofs = Vec::new();
         let mut consumer_errors = Vec::new();
+        let mut consumer_canceled = false;
         for receiver in consumer_receivers {
             match receiver.await {
                 Ok(ProverResult::Success(results)) => consumer_proofs.extend(results),
                 Ok(ProverResult::Error(error)) => consumer_errors.push(error),
+                Ok(ProverResult::Canceled) => consumer_canceled = true,
                 Err(_) => consumer_errors.push("Consumer dropped result channel".to_string()),
             }
         }
@@ -1170,6 +1204,7 @@ impl ProverPool {
             coordinator_result,
             consumer_proofs,
             consumer_errors,
+            consumer_canceled,
         ))
     }
 
@@ -1240,6 +1275,40 @@ impl ProverPool {
                 _ = &mut worker_free => {}
                 _ = self.cancel_token.cancelled() => {}
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    }
+
+    /// Build the GPU prover for `program` on every idle app worker, so the
+    /// first job dispatched after its publish starts proving immediately.
+    ///
+    /// A busy worker is skipped and swaps lazily when its next job arrives.
+    /// A worker still parked waiting for its first deployment queues the job
+    /// and runs it as soon as the install wakes it, so eligibility ignores
+    /// `is_initialized`. A build failure is logged and left for the lazy
+    /// path to retry at job time.
+    #[cfg(not(feature = "mock-provers"))]
+    pub async fn preload_app_provers(&self, program: &ProgramRef) {
+        let mut result_receivers = Vec::with_capacity(self.app_workers.len());
+        for worker in &self.app_workers {
+            if worker.is_busy.load(Ordering::SeqCst) {
+                continue;
+            }
+            let (result_sender, result_receiver) = oneshot::channel();
+            let job = AppProverJob::Preload {
+                target_program: program.clone(),
+            };
+            if worker.job_sender.try_send((job, result_sender)).is_ok() {
+                result_receivers.push(result_receiver);
+            }
+        }
+        for result_receiver in result_receivers {
+            match result_receiver.await {
+                Ok(ProverResult::Error(error)) => {
+                    warn!("Failed to preload a GPU prover for {program}: {error}")
+                }
+                Ok(_) => {}
+                Err(_) => warn!("Preload of {program} dropped its result channel"),
             }
         }
     }
@@ -1567,12 +1636,28 @@ mod tests {
             ProverResult::Success(vec![]),
             vec![],
             vec!["segment 7 failed".to_string()],
+            false,
         );
 
         let ProverResult::Error(error) = result else {
             panic!("consumer failure must fail the parallel app job");
         };
         assert!(error.contains("segment 7 failed"));
+    }
+
+    #[cfg(not(feature = "mock-provers"))]
+    #[test]
+    fn parallel_app_result_is_canceled_when_any_part_is() {
+        assert!(matches!(
+            merge_parallel_app_results(ProverResult::Canceled, vec![], vec![], false),
+            ProverResult::Canceled
+        ));
+        // A consumer that stopped leaves the segment set incomplete, so the
+        // coordinator's own success does not make the job a success.
+        assert!(matches!(
+            merge_parallel_app_results(ProverResult::Success(vec![]), vec![], vec![], true),
+            ProverResult::Canceled
+        ));
     }
 
     // Role-gated pool construction. Under `mock-provers` each prover instance

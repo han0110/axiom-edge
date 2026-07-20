@@ -3,8 +3,8 @@
 use axum::{
     body::Bytes,
     extract::{Path as UrlPath, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
+    http::{header, StatusCode},
+    response::{IntoResponse, Json, Response},
 };
 use dashmap::DashSet;
 use sdk_v2::StdIn;
@@ -16,10 +16,13 @@ use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
-use protocol::{GeneralProveRequest, MessageEnvelope, ShardedAppProveRequest};
+use protocol::{
+    GeneralProveRequest, MessageEnvelope, RegisterProgramRequest, ShardedAppProveRequest,
+};
 
 use crate::prover_pool::{JobType, ProverPool};
 use crate::provers::{InternalProverJob, LeafProverJob, ProverResult, ShardedAppProverJob};
+use crate::registration::RegistrationResult;
 use crate::result_client::ResultClient;
 
 /// Shared application state.
@@ -79,6 +82,10 @@ pub struct HealthResponse {
 pub struct ReadyResponse {
     pub ready: bool,
     pub message: String,
+    /// Programs this worker can prove right now. The manager checks the one it
+    /// is about to dispatch against this, since a worker can be ready in
+    /// general while missing a program whose push never reached it.
+    pub programs: Vec<protocol::ProgramRef>,
 }
 
 /// Health check endpoint.
@@ -156,49 +163,117 @@ pub async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     #[cfg(not(all(feature = "evm-prove", not(feature = "mock-provers"))))]
     let evm_artifacts_ready = true;
 
-    match evaluate_readiness(
+    let programs = crate::artifacts::ArtifactStore::global()
+        .map(|s| s.configured_programs())
+        .unwrap_or_default();
+
+    let (status, ready, message) = match evaluate_readiness(
         state.worker_config.worker_role,
         artifacts_ready,
         provers_ready,
         evm_artifacts_ready,
     ) {
-        Readiness::Ready => (
-            StatusCode::OK,
-            Json(ReadyResponse {
-                ready: true,
-                message: "Worker is ready".to_string(),
-            }),
-        ),
+        Readiness::Ready => (StatusCode::OK, true, "Worker is ready".to_string()),
         Readiness::ArtifactsNotLoaded => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadyResponse {
-                ready: false,
-                message: "Artifacts not loaded".to_string(),
-            }),
+            false,
+            "Artifacts not loaded".to_string(),
         ),
         Readiness::EvmArtifactsNotLoaded => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadyResponse {
-                ready: false,
-                message: "EVM artifacts (halo2 key) not loaded".to_string(),
-            }),
+            false,
+            "EVM artifacts (halo2 key) not loaded".to_string(),
         ),
         Readiness::ProversInitializing => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ReadyResponse {
-                ready: false,
-                message: format!(
-                    "Provers initializing: app={}/{}, leaf={}/{}, internal={}/{}",
-                    state.prover_pool.initialized_count(JobType::ShardedApp),
-                    state.prover_pool.configured_count(JobType::ShardedApp),
-                    state.prover_pool.initialized_count(JobType::Leaf),
-                    state.prover_pool.configured_count(JobType::Leaf),
-                    state.prover_pool.initialized_count(JobType::Internal),
-                    state.prover_pool.configured_count(JobType::Internal),
-                ),
-            }),
+            false,
+            format!(
+                "Provers initializing: app={}/{}, leaf={}/{}, internal={}/{}",
+                state.prover_pool.initialized_count(JobType::ShardedApp),
+                state.prover_pool.configured_count(JobType::ShardedApp),
+                state.prover_pool.initialized_count(JobType::Leaf),
+                state.prover_pool.configured_count(JobType::Leaf),
+                state.prover_pool.initialized_count(JobType::Internal),
+                state.prover_pool.configured_count(JobType::Internal),
+            ),
         ),
+    };
+
+    (
+        status,
+        Json(ReadyResponse {
+            ready,
+            message,
+            programs,
+        }),
+    )
+}
+
+/// Handle `POST /cancel_proof/{proof_uuid}`.
+///
+/// Records the cancellation so the proving loops stop at their next segment.
+/// Jobs for the proof that have not started are unaffected, since the manager
+/// stops dispatching them as soon as it cancels.
+pub async fn handle_cancel_proof(UrlPath(proof_uuid): UrlPath<String>) -> impl IntoResponse {
+    if let Err(reason) = validate_uploaded_proof_uuid(&proof_uuid) {
+        error!("Invalid proof_uuid: {}", reason);
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid proof_uuid: {}", reason),
+        );
     }
+
+    info!("Canceling {}", proof_uuid);
+    crate::cancellation::cancel(proof_uuid);
+    (StatusCode::OK, "Canceled".to_string())
+}
+
+/// Handle `POST /register_program`, whose body is a bincode
+/// [`RegisterProgramRequest`].
+///
+/// An accepting response body is the program's bincode verification baseline,
+/// or empty when this build derived none. The AOT compile and GPU prover
+/// preload continue after the response, so `/readyz` reports when the program
+/// is actually servable.
+pub async fn handle_register_program(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let request: RegisterProgramRequest = match bincode::deserialize(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            error!("Failed to deserialize register_program request: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to deserialize register_program request: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let program = request.program.clone();
+    info!(
+        "Received register_program for {} ({} ELF bytes)",
+        program,
+        request.elf.len()
+    );
+
+    let baseline = match crate::registration::register_program(state, request).await {
+        RegistrationResult::Accepted(baseline)
+        | RegistrationResult::AlreadyRegistered(baseline) => baseline,
+        RegistrationResult::Conflict(reason) => {
+            warn!("Rejected registration of {}: {}", program, reason);
+            return (StatusCode::CONFLICT, reason).into_response();
+        }
+        RegistrationResult::Invalid(reason) => {
+            error!("Invalid registration of {}: {}", program, reason);
+            return (StatusCode::BAD_REQUEST, reason).into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        baseline.unwrap_or_default(),
+    )
+        .into_response()
 }
 
 /// Handle `POST /upload_input/{proof_uuid}` — body is the raw bincode `StdIn`.
@@ -927,6 +1002,10 @@ pub async fn handle_sharded_app_prove(
                     error!("Failed to submit error: {}", submit_err);
                 }
             }
+            // The manager canceled the proof, so it wants no result.
+            Ok(ProverResult::Canceled) => {
+                info!("App proving canceled for {}", proof_uuid_clone);
+            }
             Err(e) => {
                 error!("Failed to submit app job: {}", e);
                 if let Err(submit_err) = state_clone
@@ -1052,6 +1131,10 @@ pub async fn handle_recursion_prove(
                         {
                             error!("Failed to submit error: {}", submit_err);
                         }
+                    }
+                    // The manager canceled the proof, so it wants no result.
+                    Ok(ProverResult::Canceled) => {
+                        info!("Leaf proving canceled for {}", proof_uuid_clone);
                     }
                     Err(e) => {
                         error!("Failed to submit leaf job: {}", e);
@@ -1214,6 +1297,10 @@ pub async fn handle_recursion_prove(
                             error!("Failed to submit error: {}", submit_err);
                         }
                     }
+                    // The manager canceled the proof, so it wants no result.
+                    Ok(ProverResult::Canceled) => {
+                        info!("Internal proving canceled for {}", proof_uuid_clone);
+                    }
                     Err(e) => {
                         error!("Failed to submit internal job: {}", e);
                         if let Err(submit_err) = state_clone
@@ -1360,6 +1447,11 @@ async fn run_evm_prove(
             })?,
         Ok(ProverResult::Error(e)) => {
             return Err(format!("Halo2 prove failed for {}: {}", proof_uuid, e));
+        }
+        // The halo2 prover runs no cancellation check, so this is unreachable
+        // in practice and reported rather than asserted.
+        Ok(ProverResult::Canceled) => {
+            return Err(format!("Halo2 prove for {} was canceled", proof_uuid));
         }
         Err(e) => {
             return Err(format!(
@@ -2098,6 +2190,7 @@ mod evm_prove_tests {
         let internal_results = match internal_result {
             crate::provers::ProverResult::Success(r) => r,
             crate::provers::ProverResult::Error(e) => panic!("internal prove failed: {}", e),
+            crate::provers::ProverResult::Canceled => panic!("unexpected cancellation"),
         };
 
         // `drive_evm_prep_and_post` POSTs to the manager; the pure prep

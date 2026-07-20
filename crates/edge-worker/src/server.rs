@@ -20,10 +20,10 @@ use tracing::info;
 use crate::artifacts::ArtifactStore;
 use crate::config::WorkerConfig;
 use crate::handlers::{
-    handle_recursion_prove, handle_sharded_app_prove, handle_upload_deferral_input,
-    handle_upload_deferral_state, handle_upload_input, handle_upload_input_compact, healthz,
-    readyz, uploaded_input_janitor_task, AppState, WorkerInfo,
-    STALE_UPLOADED_INPUT_JANITOR_INTERVAL, STALE_UPLOADED_INPUT_TTL,
+    handle_cancel_proof, handle_recursion_prove, handle_register_program, handle_sharded_app_prove,
+    handle_upload_deferral_input, handle_upload_deferral_state, handle_upload_input,
+    handle_upload_input_compact, healthz, readyz, uploaded_input_janitor_task, AppState,
+    WorkerInfo, STALE_UPLOADED_INPUT_JANITOR_INTERVAL, STALE_UPLOADED_INPUT_TTL,
 };
 use crate::prover_pool::ProverPool;
 use crate::result_client::{registration_task, ResultClient};
@@ -32,9 +32,9 @@ use crate::result_client::{registration_task, ResultClient};
 pub async fn run_server(config: WorkerConfig) -> Result<()> {
     let cancel_token = CancellationToken::new();
 
-    // Parse the deployment's program loadout from `EDGE_PROGRAMS`. Same
-    // env value is parsed by the manager; consistency is checked at
-    // registration time.
+    // Seed the loadout from `EDGE_PROGRAMS`, for a worker whose artifacts are
+    // already staged on disk. A registration-driven worker leaves it unset and
+    // starts empty, taking its programs from `/register_program`.
     let programs = parse_programs_env().map_err(|e| eyre!("Failed to parse EDGE_PROGRAMS: {e}"))?;
     info!(
         "Worker loadout: {} program(s) — {}",
@@ -48,8 +48,7 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
 
     // Register with manager first.
     // Worker IDs are deterministic from config; registration validates that the
-    // manager agrees with this exact URL -> worker_id mapping AND that the
-    // loadout matches the manager's canonical EDGE_PROGRAMS.
+    // manager agrees with this exact URL -> worker_id mapping.
     let worker_url = config.effective_worker_url();
     let registration_client =
         ResultClient::new(&config.worker.manager_url, config.worker.prover_id)?;
@@ -94,8 +93,15 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
     // STARK-side proving keys root prove needs (`agg_stark_pk`, `app_pk`,
     // plus root/halo2/deferral-cached keys), which `ArtifactStore::init`
     // above already loaded. `Full`/`StarkOnly` build the context as before.
+    //
+    // An empty loadout has nothing to build here either, since the context
+    // arrives with the first `/register_program`, which the prover threads
+    // wait for.
     #[cfg(not(feature = "mock-provers"))]
-    let app_ctx = if config.worker.worker_role.runs_stark_proving() {
+    let app_ctx = if programs.is_empty() {
+        info!("Empty loadout; app execution context arrives via /register_program");
+        None
+    } else if config.worker.worker_role.runs_stark_proving() {
         Some(build_app_worker_context(&programs)?)
     } else {
         info!(
@@ -138,7 +144,9 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
     // trusted internal setup:
     // - upload_input: raw input files (can be 30MB+)
     // - edge_prove_work: leaf/internal prove requests with serialized proofs (can be large)
+    // - register_program: a guest ELF plus its VM config
     let large_payload_routes = Router::new()
+        .route("/register_program", post(handle_register_program))
         .route("/upload_input/{proof_uuid}", post(handle_upload_input))
         .route(
             "/upload_input_compact/{proof_uuid}",
@@ -162,6 +170,7 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
         // Edge endpoints (per API spec)
         .merge(large_payload_routes) // Routes with larger body limit
         .route("/sharded_app_prove", post(handle_sharded_app_prove))
+        .route("/cancel_proof/{proof_uuid}", post(handle_cancel_proof))
         // Add state
         .with_state(state.clone())
         // Add middleware
@@ -178,7 +187,6 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
     let bg_registration_client =
         ResultClient::new(&config.worker.manager_url, config.worker.prover_id)?;
     let registration_cancel = cancel_token.clone();
-    let bg_programs = programs.clone();
     let bg_worker_role = config.worker.worker_role;
     tokio::spawn(async move {
         registration_task(
@@ -188,7 +196,6 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
             config.provers.max_app_provers,
             config.provers.max_leaf_provers,
             config.provers.max_internal_provers,
-            bg_programs,
             bg_worker_role,
             Duration::from_secs(30),
             registration_cancel,
@@ -282,10 +289,16 @@ fn build_app_worker_context(
         programs.len()
     );
 
-    Ok(Arc::new(crate::prover_pool::AppWorkerContext {
+    // Publish the context so a later `/register_program` extends it rather
+    // than replacing it, and so app workers see programs registered after
+    // boot.
+    let app_ctx = Arc::new(crate::prover_pool::AppWorkerContext {
         app_pk,
         execution_instances,
-    }))
+    });
+    store.publish_app_worker_context(app_ctx.clone());
+
+    Ok(app_ctx)
 }
 
 #[cfg(test)]

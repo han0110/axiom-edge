@@ -119,9 +119,9 @@ mod real_impl {
         pub fn new() -> Result<Self> {
             let artifact_store = ArtifactStore::global()
                 .ok_or_else(|| eyre::eyre!("Artifact store not initialized"))?;
-            let edge_artifacts = artifact_store
-                .get_edge_artifacts()
-                .ok_or_else(|| eyre::eyre!("Edge artifacts not loaded"))?;
+            // Parks on a registration-driven worker, which has no artifacts
+            // until the first `/register_program` publishes them.
+            let edge_artifacts = artifact_store.wait_for_edge_artifacts();
 
             // Get the app verifying key (child_vk for leaf prover). In
             // deferral mode `edge_artifacts.app_pk` already points at
@@ -318,6 +318,7 @@ mod tests {
                 }
             }
             ProverResult::Error(e) => panic!("Unexpected error: {}", e),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 
@@ -345,6 +346,7 @@ mod tests {
                 );
             }
             ProverResult::Success(_) => panic!("Should have failed with empty app_proofs"),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 
@@ -379,6 +381,7 @@ mod tests {
                 );
             }
             ProverResult::Success(_) => panic!("Should have failed with invalid segment range"),
+            ProverResult::Canceled => panic!("Unexpected cancellation"),
         }
     }
 }

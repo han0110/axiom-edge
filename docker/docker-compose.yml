@@ -47,9 +47,9 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - RUST_BACKTRACE=1
       # Deployment program loadout. Set by start-provers from EDGE_PROGRAMS
-      # or from --programs JSON; an empty/missing value will cause the
-      # manager to refuse to start. Workers read the same env value and
-      # must report the same list at registration.
+      # or from --programs JSON. An empty value starts the manager with an
+      # empty loadout, which /register_program fills at runtime. Workers read
+      # the same env value.
       - EDGE_PROGRAMS=${EDGE_PROGRAMS:-}
     # So edge-manager can reach an OTLP/HTTP metrics collector running on the
     # host. Inside the container, host.docker.internal resolves to the host

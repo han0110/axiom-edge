@@ -63,11 +63,11 @@ pub struct StartProofRequest {
     pub proof_uuid: String,
     /// Target program.
     ///
-    /// - When present, must be in the manager's loadout (`EDGE_PROGRAMS`);
-    ///   otherwise the request is rejected with 409.
+    /// - When present, must be in the manager's loadout; otherwise the
+    ///   request is rejected with 409.
     /// - When omitted, the manager resolves it to the loaded program
-    ///   **iff exactly one program is loaded**. With ≥ 2 programs loaded
-    ///   the field is required and the request is rejected with 400.
+    ///   **iff exactly one program is loaded**. Any other loadout size
+    ///   makes the field required and the request is rejected with 400.
     ///
     /// This makes single-program dev deployments terser without changing
     /// the wire format for multi-program prod.
@@ -211,10 +211,9 @@ pub struct RegisterWorkerRequest {
     pub max_leaf_provers: usize,
     /// Number of concurrent internal proofs this worker can run.
     pub max_internal_provers: usize,
-    /// Programs this worker has loaded vmexes for. Manager compares this
-    /// against its own `EDGE_PROGRAMS` list and refuses registration on
-    /// mismatch — both sides parse the same env value, so a mismatch
-    /// signals a misconfigured container.
+    /// Programs this worker has loaded vmexes for. Advisory, and the manager
+    /// pushes every registered program absent from this list, so a worker
+    /// that joins or restarts converges on the current loadout.
     #[serde(default)]
     pub loaded_programs: Vec<ProgramRef>,
     /// The deployment role this worker plays. Defaults to `Full` (today's
@@ -225,8 +224,8 @@ pub struct RegisterWorkerRequest {
     pub worker_role: WorkerRole,
 }
 
-/// Response shape for `GET /loadout`. Returns the manager's canonical
-/// program list, parsed once from `EDGE_PROGRAMS` at startup.
+/// Response shape for `GET /loadout`. Returns the manager's current program
+/// list, seeded from `EDGE_PROGRAMS` and extended by `/register_program`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LoadoutResponse {
     pub programs: Vec<ProgramRef>,

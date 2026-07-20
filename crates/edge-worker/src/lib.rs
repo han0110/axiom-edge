@@ -4,6 +4,7 @@
 //! including the prover thread pool and HTTP handlers.
 
 pub mod artifacts;
+pub mod cancellation;
 pub mod config;
 #[cfg(not(feature = "mock-provers"))]
 pub mod deferral_merkle;
@@ -12,6 +13,7 @@ pub mod handlers;
 pub mod openvm_config;
 pub mod prover_pool;
 pub mod provers;
+pub mod registration;
 pub mod result_client;
 pub mod server;
 #[cfg(not(feature = "mock-provers"))]

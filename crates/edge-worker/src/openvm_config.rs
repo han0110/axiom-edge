@@ -70,7 +70,8 @@ pub fn edge_vm_config() -> SdkVmConfig {
 }
 
 /// App + aggregation params used for every edge SDK build.
-fn edge_app_and_agg_params() -> (openvm_stark_backend::SystemParams, AggregationSystemParams) {
+pub(crate) fn edge_app_and_agg_params(
+) -> (openvm_stark_backend::SystemParams, AggregationSystemParams) {
     let mut app_params = app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT);
     app_params.l_skip = DEFAULT_APP_L_SKIP;
     app_params.n_stack = MAX_APP_LOG_STACKED_HEIGHT - DEFAULT_APP_L_SKIP;

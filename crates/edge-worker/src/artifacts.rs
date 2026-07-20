@@ -1,4 +1,4 @@
-//! Artifact management for pre-loaded proving artifacts.
+//! Artifact management for the worker's proving artifacts.
 //!
 //! Disk layout (multi-ELF):
 //! ```text
@@ -28,6 +28,11 @@
 //! built with `evm-prove` but missing halo2 inputs reports not-ready instead
 //! of panicking, so a stark-only deployment can still boot the evm-prove
 //! binary.
+//!
+//! The disk layout above is optional. With `EDGE_PROGRAMS` unset the worker
+//! boots with an empty deployment and derives everything from the first
+//! `/register_program` instead (see [`crate::registration`]), so the store
+//! publishes its artifacts behind a mutex rather than owning them outright.
 
 use eyre::Result;
 use once_cell::sync::OnceCell;
@@ -61,7 +66,12 @@ mod real_artifacts {
     use sdk_v2::Sdk;
     use sdk_v2::SC;
     use std::path::Path;
+    use std::sync::{Condvar, Mutex, MutexGuard};
     use tracing::warn;
+    use verify_stark::vk::VerificationBaseline;
+
+    use crate::prover_pool::AppWorkerContext;
+    use crate::provers::AppExecutionInstances;
     // Halo2/root artifacts — only under `evm-prove`.
     #[cfg(feature = "evm-prove")]
     use {
@@ -77,7 +87,11 @@ mod real_artifacts {
     /// The pk + params reader pair is what `Halo2Prover::new(reader, halo2_pk)`
     /// consumes — the reader resolves `kzg_bn254_<k>.srs` files lazily using
     /// the `k` values baked into the pk's verifier/wrapper pinnings.
+    ///
+    /// `Clone` is an `Arc` bump per field; a registration that extends an
+    /// already-published deployment carries these keys over untouched.
     #[cfg(feature = "evm-prove")]
+    #[derive(Clone)]
     pub struct EvmArtifacts {
         pub root_pk: Arc<RootProvingKey>,
         pub halo2_pk: Arc<Halo2ProvingKey>,
@@ -95,6 +109,7 @@ mod real_artifacts {
     /// `try_load_deferral`) so a broken artifact surfaces at boot rather than
     /// at first-prove. The per-worker reconstruction happens at the tail
     /// flow's entry point (`run_deferral_tail_merge`).
+    #[derive(Clone)]
     pub struct DeferralArtifacts {
         pub cached_pk: Arc<SdkCachedProvingKey<SdkVmConfig>>,
         /// `def_hook_cached_commit` extracted at boot reconstruction. The
@@ -111,6 +126,7 @@ mod real_artifacts {
     }
 
     /// Per-deployment shared keys + per-program vmexes.
+    #[derive(Clone)]
     pub struct EdgeArtifacts {
         pub app_pk: Arc<AppProvingKey<SdkVmConfig>>,
         pub agg_stark_pk: Arc<AggProvingKey>,
@@ -215,6 +231,17 @@ mod real_artifacts {
                 evm,
                 deferral,
             })
+        }
+
+        /// The same shared keys carrying one more program's vmexe. A
+        /// registration that extends an already-published deployment reuses
+        /// the installed keys rather than the ones it just derived, so the
+        /// prover threads keep proving against the keyset they were built
+        /// with.
+        fn with_program(&self, program: ProgramRef, exe: Arc<Exe>) -> Self {
+            let mut extended = self.clone();
+            extended.programs.insert(program, exe);
+            extended
         }
 
         /// Convenience: `Some(def_hook_cached_commit)` when this worker
@@ -408,18 +435,104 @@ mod real_artifacts {
         }
     }
 
+    /// Everything the worker can prove with right now.
+    ///
+    /// Published either at boot from disk (`EDGE_PROGRAMS`) or by
+    /// `/register_program`, which is why it lives behind a mutex instead of
+    /// being owned by the store.
+    #[derive(Default)]
+    struct Deployment {
+        /// Loadout this worker advertises, meaning the programs it booted
+        /// with plus every program registered since.
+        programs: Vec<ProgramRef>,
+        /// Shared keys and vmexes. `None` until the first publish.
+        artifacts: Option<Arc<EdgeArtifacts>>,
+        /// App-worker context covering the same programs, rebuilt on publish.
+        app_ctx: Option<Arc<AppWorkerContext>>,
+        /// Canonical JSON of the VM config this worker's keyset was built
+        /// under, pinned by the disk load or by the first registration to be
+        /// reserved. A registration under a different config needs a different
+        /// keyset, which the running prover threads cannot swap.
+        ///
+        /// Pinned at reservation rather than at publish because the AOT compile
+        /// between the two is long enough for a second registration to slip in
+        /// under a config this worker will never build keys for.
+        vm_config: Option<String>,
+        /// Per-program registration records, keyed by the registered program.
+        /// Disk-seeded programs have no entry and expose no baseline.
+        registered: HashMap<ProgramRef, RegisteredProgram>,
+    }
+
+    /// A program accepted by `/register_program`. `baseline` is filled in as
+    /// soon as the derivation finishes, which is well ahead of the AOT compile
+    /// that makes the program servable.
+    struct RegisteredProgram {
+        /// Kept verbatim so a repeat registration is classified exactly, with
+        /// identical bytes idempotent and different bytes a conflict.
+        elf: Vec<u8>,
+        baseline: Option<VerificationBaseline>,
+        /// Set when preparation failed, so the program stays visible to
+        /// `is_ready` and holds the worker out of the ready set instead of
+        /// vanishing and leaving it advertising a program it cannot serve.
+        failed: bool,
+    }
+
+    /// What a registration derives before its AOT compile, which is everything
+    /// needed to answer for the program's verifying key.
+    pub struct DerivedProgram {
+        pub program: ProgramRef,
+        /// Canonical JSON of the config the program was built under.
+        pub vm_config: String,
+        pub app_pk: Arc<AppProvingKey<SdkVmConfig>>,
+        pub agg_stark_pk: Arc<AggProvingKey>,
+        pub exe: Arc<Exe>,
+        pub baseline: VerificationBaseline,
+    }
+
+    /// A derived program whose AOT compile has finished, so it can be published.
+    pub struct PreparedProgram {
+        pub derived: DerivedProgram,
+        pub execution_instances: Arc<AppExecutionInstances>,
+    }
+
+    /// How a `/register_program` request compares against the published
+    /// deployment.
+    pub enum RegistrationOutcome {
+        /// The program is reserved; preparation should start.
+        Accepted,
+        /// The same program, ELF and config are already here.
+        AlreadyRegistered,
+        /// Incompatible with what this worker already serves.
+        Conflict(String),
+    }
+
+    /// Canonical JSON for a VM config, used to compare a registration against
+    /// the config this worker is pinned to. Serde emits struct fields in
+    /// declaration order and the config is a plain struct tree, so equal
+    /// configs always produce equal strings and serialization cannot fail.
+    pub fn canonical_vm_config(config: &SdkVmConfig) -> String {
+        serde_json::to_string(config).expect("SdkVmConfig is JSON-serializable")
+    }
+
     /// Store for proving artifacts.
     pub struct ArtifactStore {
-        configured_programs: Vec<ProgramRef>,
         #[allow(dead_code)]
         artifacts_path: PathBuf,
-        edge_artifacts: Option<EdgeArtifacts>,
+        deployment: Mutex<Deployment>,
+        /// Signalled after every publish. Prover threads are OS threads, not
+        /// tasks, so they block here rather than awaiting.
+        published: Condvar,
     }
 
     impl ArtifactStore {
         /// Initialize the global artifact store and load all configured
         /// artifacts. On load failure, the store still initializes but
         /// `is_ready()` returns false and `/readyz` reports not ready.
+        ///
+        /// An empty loadout means the deployment is registration-driven, so
+        /// there is nothing on disk to load and the shared keys arrive with
+        /// the first `/register_program`. A deferral deployment always sets
+        /// `EDGE_PROGRAMS`, so its keyset still loads here.
         pub fn init(config: &ArtifactsConfig, programs: Vec<ProgramRef>) -> Result<()> {
             let artifacts_path = config
                 .artifacts_path
@@ -436,35 +549,52 @@ mod real_artifacts {
             let halo2_pk_path = config.halo2_pk_path.clone();
             let enable_deferral = config.enable_deferral;
 
-            let load_result = EdgeArtifacts::load_from_disk(
-                &artifacts_path,
-                &programs,
-                #[cfg(feature = "evm-prove")]
-                halo2_pk_path.as_deref(),
-                enable_deferral,
-            );
+            let edge_artifacts = if programs.is_empty() {
+                info!("No programs configured; deployment arrives via /register_program");
+                None
+            } else {
+                let load_result = EdgeArtifacts::load_from_disk(
+                    &artifacts_path,
+                    &programs,
+                    #[cfg(feature = "evm-prove")]
+                    halo2_pk_path.as_deref(),
+                    enable_deferral,
+                );
 
-            let edge_artifacts = match load_result {
-                Ok(artifacts) => {
-                    info!(
-                        "Successfully loaded Edge artifacts ({} vmexes)",
-                        artifacts.programs.len()
-                    );
-                    Some(artifacts)
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to load Edge artifacts: {}. Worker will report not ready.",
-                        e
-                    );
-                    None
+                match load_result {
+                    Ok(artifacts) => {
+                        info!(
+                            "Successfully loaded Edge artifacts ({} vmexes)",
+                            artifacts.programs.len()
+                        );
+                        Some(Arc::new(artifacts))
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load Edge artifacts: {}. Worker will report not ready.",
+                            e
+                        );
+                        None
+                    }
                 }
             };
 
+            // Pin the config the disk keyset was built under so a later
+            // registration is checked against it instead of being served by a
+            // keyset it does not match.
+            let vm_config = edge_artifacts
+                .as_ref()
+                .map(|a| canonical_vm_config(&a.app_pk.app_vm_pk.vm_config));
+
             let store = Self {
-                configured_programs: programs,
                 artifacts_path,
-                edge_artifacts,
+                deployment: Mutex::new(Deployment {
+                    programs,
+                    artifacts: edge_artifacts,
+                    vm_config,
+                    ..Default::default()
+                }),
+                published: Condvar::new(),
             };
 
             ARTIFACT_STORE
@@ -477,35 +607,305 @@ mod real_artifacts {
             ARTIFACT_STORE.get().cloned()
         }
 
-        /// Shared deployment-level proving keys and the per-program vmexe
-        /// map. `None` if loading failed at startup.
-        pub fn get_edge_artifacts(&self) -> Option<&EdgeArtifacts> {
-            self.edge_artifacts.as_ref()
+        fn lock(&self) -> MutexGuard<'_, Deployment> {
+            self.deployment.lock().expect("artifact store poisoned")
         }
 
-        /// Look up the vmexe for a specific program. Returns `None` if
-        /// loading failed or the program is not in the configured list.
+        /// Shared deployment-level proving keys and the per-program vmexe
+        /// map. `None` until a deployment is published.
+        pub fn get_edge_artifacts(&self) -> Option<Arc<EdgeArtifacts>> {
+            self.lock().artifacts.clone()
+        }
+
+        /// Block until a deployment is published, then return its shared keys.
+        ///
+        /// Prover threads call this at startup. On a registration-driven
+        /// worker they park here and stay un-initialized, which keeps
+        /// `/readyz` false until the worker can actually prove.
+        pub fn wait_for_edge_artifacts(&self) -> Arc<EdgeArtifacts> {
+            let mut deployment = self.lock();
+            if deployment.artifacts.is_none() {
+                info!("Waiting for a deployment before building provers");
+            }
+            while deployment.artifacts.is_none() {
+                deployment = self
+                    .published
+                    .wait(deployment)
+                    .expect("artifact store poisoned");
+            }
+            deployment.artifacts.clone().expect("published above")
+        }
+
+        /// Look up the vmexe for a specific program. Returns `None` if the
+        /// program is not part of the published deployment.
         pub fn vmexe(&self, program: &ProgramRef) -> Option<Arc<Exe>> {
-            self.edge_artifacts
-                .as_ref()
-                .and_then(|a| a.programs.get(program).cloned())
+            let deployment = self.lock();
+            deployment
+                .artifacts
+                .as_ref()?
+                .programs
+                .get(program)
+                .cloned()
         }
 
         /// The configured loadout, even if loading is not yet complete.
         /// Used by `/register_worker` to advertise what this worker is
         /// supposed to serve.
-        pub fn configured_programs(&self) -> &[ProgramRef] {
-            &self.configured_programs
+        pub fn configured_programs(&self) -> Vec<ProgramRef> {
+            self.lock().programs.clone()
         }
 
-        /// True iff every shared key plus every per-program vmexe loaded.
-        /// This does **not** require EVM artifacts to be present — a worker
-        /// that only serves stark proofs is "ready" even with `evm: None`.
+        /// True iff every shared key plus every per-program vmexe loaded and
+        /// no registration is still preparing. This does **not** require EVM
+        /// artifacts to be present — a worker that only serves stark proofs is
+        /// "ready" even with `evm: None`.
+        ///
+        /// Every registered program must also be published, which is what
+        /// holds `/start_proof` back while an AOT compile runs and after one
+        /// has failed, since a program's verifying key goes out before its
+        /// compile ends.
         pub fn is_ready(&self) -> bool {
-            match &self.edge_artifacts {
-                Some(a) => a.programs.len() == self.configured_programs.len(),
-                None => false,
+            let deployment = self.lock();
+            deployment
+                .registered
+                .keys()
+                .all(|program| deployment.programs.contains(program))
+                && deployment
+                    .artifacts
+                    .as_ref()
+                    .is_some_and(|a| a.programs.len() == deployment.programs.len())
+        }
+
+        /// The app-worker context for the published deployment.
+        pub fn app_worker_context(&self) -> Option<Arc<AppWorkerContext>> {
+            self.lock().app_ctx.clone()
+        }
+
+        /// Block until an app-worker context is published. App worker threads
+        /// on a registration-driven worker park here at startup.
+        pub fn wait_for_app_worker_context(&self) -> Arc<AppWorkerContext> {
+            let mut deployment = self.lock();
+            if deployment.app_ctx.is_none() {
+                info!("Waiting for a deployment before serving app jobs");
             }
+            while deployment.app_ctx.is_none() {
+                deployment = self
+                    .published
+                    .wait(deployment)
+                    .expect("artifact store poisoned");
+            }
+            deployment.app_ctx.clone().expect("published above")
+        }
+
+        /// Publish the context built at boot from the disk-seeded loadout, so
+        /// a later registration extends it instead of replacing it.
+        pub fn publish_app_worker_context(&self, app_ctx: Arc<AppWorkerContext>) {
+            self.lock().app_ctx = Some(app_ctx);
+            self.published.notify_all();
+        }
+
+        /// Classify a registration against the published deployment and, when
+        /// it is new, reserve the program so a concurrent duplicate does not
+        /// start a second preparation.
+        ///
+        /// `vm_config` is the canonical JSON of the parsed config, so the
+        /// pinned-config comparison is a byte comparison.
+        pub fn begin_registration(
+            &self,
+            program: &ProgramRef,
+            elf: &[u8],
+            vm_config: &str,
+        ) -> RegistrationOutcome {
+            let mut deployment = self.lock();
+
+            if deployment
+                .vm_config
+                .as_deref()
+                .is_some_and(|pinned| pinned != vm_config)
+            {
+                return RegistrationOutcome::Conflict(format!(
+                    "worker is pinned to a different vm_config; restart it to serve {program}"
+                ));
+            }
+            // A deferral keyset carries hook AIRs that cannot be re-derived
+            // from `vm_config` alone, so registration cannot produce keys or a
+            // baseline that match what this worker proves with.
+            if deployment
+                .artifacts
+                .as_ref()
+                .is_some_and(|a| a.is_deferral_deployment())
+            {
+                return RegistrationOutcome::Conflict(
+                    "worker booted a deferral keyset, which registration cannot derive; \
+                     restart it with enable_deferral off to accept registrations"
+                        .to_string(),
+                );
+            }
+
+            let outcome = match deployment.registered.get(program) {
+                Some(existing) if existing.elf != elf => RegistrationOutcome::Conflict(format!(
+                    "{program} is registered with different ELF bytes; use a new version"
+                )),
+                // A record left behind by a failed preparation is retried
+                // rather than reported as already registered.
+                Some(existing) if !existing.failed => RegistrationOutcome::AlreadyRegistered,
+                _ if deployment.programs.contains(program) => RegistrationOutcome::Conflict(
+                    format!("{program} is already served from disk artifacts"),
+                ),
+                _ => {
+                    deployment.registered.insert(
+                        program.clone(),
+                        RegisteredProgram {
+                            elf: elf.to_vec(),
+                            baseline: None,
+                            failed: false,
+                        },
+                    );
+                    RegistrationOutcome::Accepted
+                }
+            };
+
+            // Pin the config the moment a program is reserved, so the long AOT
+            // compile that follows cannot be overlapped by a registration this
+            // worker's keyset will never match.
+            if matches!(outcome, RegistrationOutcome::Accepted) {
+                deployment
+                    .vm_config
+                    .get_or_insert_with(|| vm_config.to_string());
+            }
+            outcome
+        }
+
+        /// Drop a reservation that never reported anything, so the worker is
+        /// left exactly as it was before the registration arrived.
+        ///
+        /// This is the derivation's failure path. The response carries the
+        /// failure, so the manager rolls the program out of its loadout and
+        /// never replays it, and a record left behind would hold the worker out
+        /// of the ready set with nothing able to clear it.
+        pub fn release_registration(&self, program: &ProgramRef) {
+            let mut deployment = self.lock();
+            deployment.registered.remove(program);
+            // The pin exists to keep a second config away from a keyset this
+            // worker is committed to. Nothing is committed once the last
+            // reservation is gone and nothing has been published.
+            if deployment.artifacts.is_none() && deployment.registered.is_empty() {
+                deployment.vm_config = None;
+            }
+            drop(deployment);
+            self.published.notify_all();
+        }
+
+        /// Mark a reservation whose AOT compile failed. The record stays so
+        /// `is_ready` keeps reporting the worker unable to serve the program,
+        /// and the manager's replay of the program it still holds retries it.
+        pub fn fail_registration(&self, program: &ProgramRef) {
+            if let Some(entry) = self.lock().registered.get_mut(program) {
+                entry.failed = true;
+            }
+            self.published.notify_all();
+        }
+
+        /// Record a program's verification baseline as soon as it is derived,
+        /// ahead of the AOT compile, so `/register_program` can answer with it.
+        pub fn record_baseline(&self, program: &ProgramRef, baseline: VerificationBaseline) {
+            self.lock()
+                .registered
+                .get_mut(program)
+                .expect("program was reserved by begin_registration")
+                .baseline = Some(baseline);
+            self.published.notify_all();
+        }
+
+        /// Block until `program`'s reservation has derived a baseline, then
+        /// return it. `None` once the preparation failed, and for a program
+        /// this worker holds no reservation for.
+        ///
+        /// A registration that arrives while an identical one is still
+        /// deriving waits here rather than answering with no key, so the
+        /// manager never has to treat a worker as having declined to report.
+        pub fn wait_for_baseline(&self, program: &ProgramRef) -> Option<VerificationBaseline> {
+            let mut deployment = self.lock();
+            loop {
+                let entry = deployment.registered.get(program)?;
+                if entry.failed {
+                    return None;
+                }
+                if let Some(baseline) = &entry.baseline {
+                    return Some(baseline.clone());
+                }
+                deployment = self
+                    .published
+                    .wait(deployment)
+                    .expect("artifact store poisoned");
+            }
+        }
+
+        /// Install a prepared program's artifacts. Installs the keyset if
+        /// this is the first deployment, adds the program's vmexe and
+        /// execution instances, and wakes every parked prover thread. The
+        /// program is not servable until [`Self::publish_registration`], so
+        /// `is_ready` keeps holding `/start_proof` back while the app
+        /// provers preload it.
+        pub fn install_registration(&self, prepared: PreparedProgram) {
+            let PreparedProgram {
+                derived:
+                    DerivedProgram {
+                        program,
+                        vm_config,
+                        app_pk,
+                        agg_stark_pk,
+                        exe,
+                        // Already recorded by `record_baseline`.
+                        baseline: _,
+                    },
+                execution_instances,
+            } = prepared;
+
+            let mut deployment = self.lock();
+
+            let artifacts = match &deployment.artifacts {
+                Some(existing) => existing.with_program(program.clone(), exe),
+                None => EdgeArtifacts {
+                    app_pk,
+                    agg_stark_pk,
+                    programs: HashMap::from([(program.clone(), exe)]),
+                    #[cfg(feature = "evm-prove")]
+                    evm: None,
+                    deferral: None,
+                },
+            };
+
+            let mut instances = deployment
+                .app_ctx
+                .as_ref()
+                .map(|ctx| ctx.execution_instances.clone())
+                .unwrap_or_default();
+            instances.insert(program.clone(), execution_instances);
+
+            deployment.app_ctx = Some(Arc::new(AppWorkerContext {
+                app_pk: artifacts.app_pk.clone(),
+                execution_instances: instances,
+            }));
+            deployment.artifacts = Some(Arc::new(artifacts));
+            deployment.vm_config = Some(vm_config);
+
+            info!("Installed artifacts for {program}");
+            self.published.notify_all();
+        }
+
+        /// Mark an installed program servable, completing its registration.
+        /// From here `is_ready` counts it and `/readyz` lists it, which is
+        /// what lets the manager release its key on `/program_vk`.
+        pub fn publish_registration(&self, program: &ProgramRef) {
+            let mut deployment = self.lock();
+            deployment.programs.push(program.clone());
+
+            info!(
+                "Published {program}; worker now serves {} program(s)",
+                deployment.programs.len()
+            );
+            self.published.notify_all();
         }
     }
 }
@@ -521,9 +921,13 @@ pub use real_artifacts::*;
 mod mock_artifacts {
     use super::*;
 
+    use std::sync::Mutex;
+
     /// Store for proving artifacts (mock mode).
     pub struct ArtifactStore {
-        configured_programs: Vec<ProgramRef>,
+        /// Mock builds derive no keys, so a registration only records the
+        /// program here. Behind a mutex because it grows at runtime.
+        configured_programs: Mutex<Vec<ProgramRef>>,
         #[allow(dead_code)]
         artifacts_path: PathBuf,
     }
@@ -559,13 +963,28 @@ mod mock_artifacts {
             );
 
             Ok(Self {
-                configured_programs: programs,
+                configured_programs: Mutex::new(programs),
                 artifacts_path,
             })
         }
 
-        pub fn configured_programs(&self) -> &[ProgramRef] {
-            &self.configured_programs
+        pub fn configured_programs(&self) -> Vec<ProgramRef> {
+            self.lock().clone()
+        }
+
+        /// Add a registered program to the advertised loadout. Idempotent, so
+        /// a repeat registration is a no-op.
+        pub fn record_registration(&self, program: ProgramRef) {
+            let mut programs = self.lock();
+            if !programs.contains(&program) {
+                programs.push(program);
+            }
+        }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, Vec<ProgramRef>> {
+            self.configured_programs
+                .lock()
+                .expect("artifact store poisoned")
         }
 
         /// Always ready in mock mode.

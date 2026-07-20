@@ -15,19 +15,21 @@ use tower_http::trace::TraceLayer;
 
 use crate::config::ManagerConfig;
 use crate::handlers::{
-    cancel_proof, get_loadout, healthz, list_workers, proof_debug, proof_result, proof_state,
-    proof_timeout_watchdog_task, readyz_handler, register_worker, start_proof, upload_input,
-    AppState, PROOF_TIMEOUT_WATCHDOG_INTERVAL,
+    cancel_proof, final_proof, get_loadout, healthz, list_workers, program_vk, proof_debug,
+    proof_events, proof_result, proof_state, proof_timeout_watchdog_task, readyz_handler,
+    register_program, register_worker, start_proof, upload_input, AppState,
+    PROOF_TIMEOUT_WATCHDOG_INTERVAL,
 };
 
 /// Run the HTTP server.
 pub async fn run_server(config: ManagerConfig) -> Result<()> {
-    // Parse the deployment's program loadout once at startup. The same
-    // EDGE_PROGRAMS value is also injected onto every worker container;
-    // /register_worker rejects workers whose loaded_programs differs.
+    // Seed the loadout from EDGE_PROGRAMS, for a deployment whose artifacts
+    // are already staged on the workers' disks. A registration-driven
+    // deployment leaves it unset and starts empty, filling the loadout
+    // through /register_program.
     let programs = parse_programs_env().map_err(|e| eyre!("Failed to parse EDGE_PROGRAMS: {e}"))?;
     tracing::info!(
-        "Manager loadout: {} program(s) — {}",
+        "Manager loadout: {} seeded program(s) — {}",
         programs.len(),
         programs
             .iter()
@@ -64,9 +66,11 @@ pub async fn run_server(config: ManagerConfig) -> Result<()> {
     //   today, but a larger program or segment config can cross it — and a
     //   413 here is a silent proof stall (the worker's streaming loop drops
     //   the result without retry).
+    // - `/register_program`: a multipart body carrying a whole guest ELF.
     let large_body_routes = Router::new()
         .route("/upload_input/{proof_uuid}", post(upload_input))
         .route("/proof_result", post(proof_result))
+        .route("/register_program", post(register_program))
         .layer(DefaultBodyLimit::disable());
 
     let app = Router::new()
@@ -76,7 +80,10 @@ pub async fn run_server(config: ManagerConfig) -> Result<()> {
         .route("/workers", get(list_workers))
         .route("/readyz", get(readyz_handler))
         .route("/loadout", get(get_loadout))
+        .route("/program_vk/{name}/{version}", get(program_vk))
+        .route("/final_proof/{proof_uuid}", get(final_proof))
         .route("/proof_state/{proof_uuid}", get(proof_state))
+        .route("/proof_events/{proof_uuid}", get(proof_events))
         .route("/proof_debug/{proof_uuid}", get(proof_debug))
         .route("/cancel_proof", post(cancel_proof))
         .merge(large_body_routes)

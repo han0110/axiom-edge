@@ -11,7 +11,7 @@ use super::ProgramRef;
 pub struct ProofContext {
     pub proof_uuid: String,
     /// Program targeted by this proof — `(name, version)` from the
-    /// deployment's loadout (`EDGE_PROGRAMS`).
+    /// deployment's loadout.
     pub program: ProgramRef,
 
     /// Opaque, deployment-defined key/value labels carried with the proof.

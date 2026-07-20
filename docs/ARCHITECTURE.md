@@ -39,12 +39,13 @@ The manager pushes work to workers. Workers do not poll for work.
 
 ## Worker
 
-Each worker owns a thread-pinned prover pool. Per-program CPU execution artifacts are built once at startup and shared across the pool; the GPU prover is loaded lazily per program and swapped when a job targets a different program, so a worker can serve any program in the loadout without holding every program's GPU state at once.
+Each worker owns a thread-pinned prover pool. Per-program CPU execution artifacts are built once per program, at startup for a seeded loadout and at registration otherwise, and shared across the pool; the GPU prover is built on idle provers when a registered program is published and swapped lazily when a job targets a different program, so a worker can serve any program in the loadout without holding every program's GPU state at once.
 
 Worker endpoints:
 
 - `/healthz`: process health
-- `/readyz`: artifact and prover readiness
+- `/readyz`: artifact and prover readiness, plus the programs this worker serves
+- `/register_program`: derive a program's artifacts from a guest ELF and a VM config
 - `/upload_input`: store bincode `StdIn` input
 - `/upload_input_compact`: convert compact bytes to bincode `StdIn`
 - `/sharded_app_prove`: start app proving for this worker's segments
@@ -52,7 +53,7 @@ Worker endpoints:
 
 ## Data Flow
 
-1. Worker starts, loads artifacts for every program in the loadout, creates its prover pool, and registers with the manager (sending its `loaded_programs` for loadout validation).
+1. Worker starts, loads artifacts for every program `EDGE_PROGRAMS` seeds, creates its prover pool, and registers with the manager, which pushes every registered program the worker's `loaded_programs` omits.
 2. Client calls `POST /start_proof`, naming the target `program` (`{name, version}`; optional when only one program is loaded).
 3. Manager validates the program against its loadout, checks ready workers, and creates proof state.
 4. Manager uploads input to workers unless the request says input is already uploaded.

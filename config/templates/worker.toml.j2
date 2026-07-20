@@ -20,7 +20,7 @@ worker_role = "{{ worker_role }}"
 #   {artifacts_path}/agg_stark_pk                        (shared)
 #   {artifacts_path}/root_pk                             (shared, evm-prove only)
 #   {artifacts_path}/programs/{name}/{version}/program.vmexe   (per-ELF)
-# The program loadout itself comes from the EDGE_PROGRAMS env, set on
+# The program loadout itself is seeded by the EDGE_PROGRAMS env, set on
 # every container by start-provers.
 artifacts_path = "/data/artifacts"
 {% if halo2_pk_path %}

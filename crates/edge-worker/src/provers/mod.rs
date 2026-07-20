@@ -67,6 +67,10 @@ pub enum ProverResult {
     Success(Vec<ProofResult>),
     /// Error during proving
     Error(String),
+    /// The proof was canceled, so the job stopped at its next segment and has
+    /// nothing to report. The manager has already dropped the proof, so this
+    /// is not sent on as a failure.
+    Canceled,
 }
 
 /// Job for the sharded app prover.
