@@ -431,10 +431,19 @@ impl ProofState {
             num_internal_layers_for_leaf_count(num_leaf_proofs, internal_arity);
         let effective_final_layer = num_internal_layers.max(2) - 1;
 
+        // The only record of the recursion tree's shape. Both arities are here
+        // because a parser needs them to place every task in the tree.
         info!(
-            "trigger_tail_proofs: num_segments={}, leaf_arity={}, num_leaf_proofs={}, \
-             num_internal_layers={}, effective_final_layer={}",
-            num_segments, leaf_arity, num_leaf_proofs, num_internal_layers, effective_final_layer
+            "trigger_tail_proofs for proof {}: num_segments={}, leaf_arity={}, \
+             internal_arity={}, num_leaf_proofs={}, num_internal_layers={}, \
+             effective_final_layer={}",
+            self.context.proof_uuid,
+            num_segments,
+            leaf_arity,
+            internal_arity,
+            num_leaf_proofs,
+            num_internal_layers,
+            effective_final_layer
         );
 
         for layer_idx in 0..num_internal_layers {
