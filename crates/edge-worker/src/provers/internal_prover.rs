@@ -358,9 +358,10 @@ mod real_impl {
         };
 
         info!(
-            "Generated internal proof: layer={}, segment=[{}, {}], is_final={}, prove={}ms, compress={}ms",
+            "Generated internal proof: layer={}, segment=[{}, {}], is_final={}, prove={}ms, compress={}ms, spans={}",
             job.layer_idx, job.segment_start, job.segment_end, job.is_final_proof,
-            prove_time_ms, compression_time_ms
+            prove_time_ms, compression_time_ms,
+            telemetry::span_timing::format_span_timings(&sub_metrics)
         );
 
         // Create the result structure - propagate user_public_values from child proofs.

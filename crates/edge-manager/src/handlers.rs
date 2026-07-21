@@ -12,6 +12,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -22,9 +23,9 @@ use crate::proof_state::{ProofResultEnvelopeOutcome, ProofState, ProofStatus};
 use crate::scheduler::{AssignedWork, EdgeStateStore};
 use crate::worker_registry::{app_eligible_workers, EdgeWorkerRegistry, RegisteredWorker};
 use protocol::{
-    GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef, ProofContext, ProofResult,
-    RegisterProgramRequest, RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest,
-    StartProofRequest, Step, WithProofContext,
+    current_timestamp, GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef,
+    ProofContext, ProofResult, RegisterProgramRequest, RegisterWorkerRequest, ResultPayload,
+    ShardedAppProveRequest, StartProofRequest, Step, WithProofContext,
 };
 use std::collections::BTreeMap;
 
@@ -1249,6 +1250,10 @@ pub async fn start_proof(
         "upload_input"
     };
     if let Some(ref data) = input_data {
+        // The fan-out begins and ends on this one clock, so the elapsed time is
+        // the input-transfer cost with no cross-host skew in it.
+        let fanout_started = Instant::now();
+        let fanout_bytes = data.len();
         let mut upload_handles = vec![];
         for (worker_id, worker) in &workers {
             let client = state.upload_client.clone(); // Use upload client with longer timeout
@@ -1277,7 +1282,10 @@ pub async fn start_proof(
                     {
                         Ok(resp) => {
                             if resp.status().is_success() {
-                                info!("Successfully uploaded input to worker {}", wid);
+                                info!(
+                                    "Successfully uploaded input to worker {} for proof {}",
+                                    wid, proof_uuid_clone
+                                );
                                 return Ok(wid);
                             }
                             // Non-success status, retry
@@ -1336,6 +1344,14 @@ pub async fn start_proof(
                 }
             }
         }
+
+        info!(
+            "Input fan-out complete for proof {}: workers={}, bytes={}, elapsed={}ms",
+            proof_uuid,
+            workers.len(),
+            fanout_bytes,
+            fanout_started.elapsed().as_millis()
+        );
 
         // If any uploads failed, abort the proof
         if !upload_failures.is_empty() {
@@ -1472,7 +1488,13 @@ pub async fn start_proof(
                         error!("{}", msg);
                         Err(msg)
                     } else {
-                        info!("Work sent to worker {}", worker_id);
+                        info!(
+                            "Work sent to worker {} for proof {}: prover_id={}, num_provers={}",
+                            worker_id,
+                            work_request.proof_uuid,
+                            work_request.prover_id,
+                            work_request.num_provers
+                        );
                         Ok(())
                     }
                 }
@@ -2240,11 +2262,38 @@ async fn send_work_to_worker(client: &reqwest::Client, work: &AssignedWork) -> b
         }
     };
 
+    // The envelope timestamp is stamped when the result handler built this
+    // request, so the gap to now is how long the task waited on the manager for
+    // a free worker. The task descriptor repeats the identity the worker puts
+    // on its own span, which is what lets the two logs be joined.
+    let queue_wait_ms = current_timestamp().saturating_sub(work.envelope.timestamp);
+    let task = match &work.envelope.message {
+        GeneralProveRequest::LeafProve(req) => format!(
+            "segments=[{}, {}], children={}",
+            req.segment_start,
+            req.segment_end,
+            req.app_proofs.len()
+        ),
+        GeneralProveRequest::InternalProve(req) => format!(
+            "layer={}, segments=[{}, {}], children={}, is_final={}",
+            req.layer_idx,
+            req.segment_start,
+            req.segment_end,
+            req.child_proofs.len(),
+            req.is_final_proof
+        ),
+        GeneralProveRequest::EvmProve(req) => {
+            format!("has_deferral={}", req.proof_has_deferral)
+        }
+    };
+
     info!(
-        "Sending {} work to worker {} for proof {}",
+        "Sending {} work to worker {} for proof {}: {}, queue_wait={}ms",
         work.step.as_str(),
         work.worker_id,
-        work.proof_uuid
+        work.proof_uuid,
+        task,
+        queue_wait_ms
     );
 
     match client
