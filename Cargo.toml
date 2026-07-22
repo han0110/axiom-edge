@@ -159,3 +159,75 @@ lto = "fat"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# Redirects every stark-backend crate in the graph, including openvm's
+# transitive pulls, to the fork branch carrying the interaction memory
+# estimate fix on top of the v2.0.0 tag. All crates of the source move
+# together so the graph keeps one stark-backend source (see the pin comment
+# above [workspace.dependencies] regarding the `links` constraint).
+[patch."https://github.com/openvm-org/stark-backend.git"]
+openvm-codec-derive = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-cpu-backend = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-cuda-backend = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-cuda-builder = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-cuda-common = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-stark-backend = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+openvm-stark-sdk = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/distributed/v2.0.0" }
+
+# Redirects every openvm crate in the graph to the fork branch carrying the
+# GPU OOM fix that pairs with the stark-backend fork above. Cargo patches a git
+# source only through a different repository URL, so the fork stands in for the
+# upstream tag. All crates of the source move together so the graph keeps one
+# openvm source, matching the stark-backend block above.
+[patch."https://github.com/openvm-org/openvm.git"]
+openvm = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-algebra-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-algebra-complex-macros = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-algebra-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-algebra-moduli-macros = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-algebra-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-bigint-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-bigint-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-bigint-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-build = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-circuit-derive = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-circuit-primitives = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-circuit-primitives-derive = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-continuations = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-custom-insn = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-deferral-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-deferral-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-deferral-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-ecc-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-ecc-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-ecc-sw-macros = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-ecc-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-instructions = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-instructions-derive = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-keccak256-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-keccak256-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-keccak256-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-macros-common = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-mod-circuit-builder = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-pairing-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-pairing-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-pairing-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-platform = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-poseidon2-air = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-recursion-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-recursion-circuit-derive = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-rv32-adapters = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-rv32im-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-rv32im-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-rv32im-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sdk = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sha2-air = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sha2-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sha2-guest = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-sha2-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-static-verifier = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-transpiler = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-verify-stark-circuit = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
+openvm-verify-stark-host = { git = "https://github.com/han0110/openvm.git", branch = "patch/distributed/v2.0.0" }
