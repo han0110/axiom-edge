@@ -158,3 +158,65 @@ lto = "fat"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+[patch."https://github.com/openvm-org/stark-backend.git"]
+openvm-codec-derive = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-cpu-backend = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-cuda-backend = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-cuda-builder = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-cuda-common = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-stark-backend = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+openvm-stark-sdk = { git = "https://github.com/openvm-org//stark-backend.git", branch = "fix/update-memory-metering" }
+
+[patch."https://github.com/openvm-org/openvm.git"]
+openvm = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-algebra-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-algebra-complex-macros = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-algebra-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-algebra-moduli-macros = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-algebra-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-bigint-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-bigint-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-bigint-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-build = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-circuit-derive = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-circuit-primitives = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-circuit-primitives-derive = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-continuations = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-custom-insn = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-deferral-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-deferral-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-deferral-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-ecc-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-ecc-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-ecc-sw-macros = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-ecc-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-instructions = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-instructions-derive = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-keccak256-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-keccak256-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-keccak256-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-macros-common = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-mod-circuit-builder = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-pairing-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-pairing-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-pairing-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-platform = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-poseidon2-air = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-recursion-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-recursion-circuit-derive = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-rv32-adapters = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-rv32im-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-rv32im-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-rv32im-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sdk = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sdk-config = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sha2-air = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sha2-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sha2-guest = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-sha2-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-static-verifier = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-transpiler = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-verify-stark-circuit = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
+openvm-verify-stark-host = { git = "https://github.com/openvm-org//openvm.git", branch = "fix/update-memory-metering" }
