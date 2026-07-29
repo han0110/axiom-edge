@@ -1,0 +1,74 @@
+2026-07-29T08:13:10.087932Z  INFO edge_manager::otel_metrics: metrics.endpoint not set, metrics export disabled
+2026-07-29T08:13:10.087969Z  INFO edge_manager: Starting Edge Manager on 0.0.0.0:3000
+2026-07-29T08:13:10.087993Z  INFO edge_manager::server: Manager loadout: 1 program(s) — stateless-validator-reth@v1
+2026-07-29T08:13:10.150527Z  INFO edge_manager::server: Edge Manager listening on 0.0.0.0:3000
+2026-07-29T08:14:20.727607Z  INFO edge_manager::handlers: Starting Edge proof: proof_uuid=repro-01, program=stateless-validator-reth@v1
+2026-07-29T08:14:20.727646Z  INFO edge_manager::worker_registry: ready_workers: returning 1 workers sorted by ID: [(0, "http://127.0.0.1:8001")]
+2026-07-29T08:14:20.728074Z  INFO edge_manager::scheduler: init_proof repro-01: 1 workers registered (1 app-eligible / normal-set)
+2026-07-29T08:14:20.728089Z  INFO edge_manager::handlers: Proof repro-01 uses worker-pre-uploaded input (Flow 1); manager skips fan-out
+2026-07-29T08:14:20.728428Z  INFO edge_manager::handlers: Work sent to worker 0
+2026-07-29T08:14:24.077999Z  INFO edge_manager::proof_state::result_handler: Batch [0-3] not yet complete, missing segment 0
+2026-07-29T08:14:24.078025Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:24.485335Z  INFO edge_manager::proof_state::result_handler: Batch [0-3] not yet complete, missing segment 2
+2026-07-29T08:14:24.485358Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:26.453555Z  INFO edge_manager::proof_state::result_handler: Batch [0-3] not yet complete, missing segment 3
+2026-07-29T08:14:26.453585Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:26.890899Z  INFO edge_manager::proof_state::result_handler: Batch [0-3] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:26.890927Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:28.852272Z  INFO edge_manager::proof_state::result_handler: Batch [4-7] not yet complete, missing segment 5
+2026-07-29T08:14:28.852296Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:29.320589Z  INFO edge_manager::proof_state::result_handler: Batch [4-7] not yet complete, missing segment 6
+2026-07-29T08:14:29.320613Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:31.278390Z  INFO edge_manager::proof_state::result_handler: Batch [4-7] not yet complete, missing segment 7
+2026-07-29T08:14:31.278407Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:31.695622Z  INFO edge_manager::proof_state::result_handler: Batch [4-7] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:31.695640Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:33.708405Z  INFO edge_manager::proof_state::result_handler: Batch [8-11] not yet complete, missing segment 9
+2026-07-29T08:14:33.708454Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:34.159347Z  INFO edge_manager::proof_state::result_handler: Batch [8-11] not yet complete, missing segment 10
+2026-07-29T08:14:34.159400Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:36.264891Z  INFO edge_manager::proof_state::result_handler: Batch [8-11] not yet complete, missing segment 11
+2026-07-29T08:14:36.264939Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:36.715388Z  INFO edge_manager::proof_state::result_handler: Batch [8-11] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:36.715438Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:38.853264Z  INFO edge_manager::proof_state::result_handler: Batch [12-15] not yet complete, missing segment 13
+2026-07-29T08:14:38.853322Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:39.294295Z  INFO edge_manager::proof_state::result_handler: Batch [12-15] not yet complete, missing segment 14
+2026-07-29T08:14:39.294347Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:41.554209Z  INFO edge_manager::proof_state::result_handler: Batch [12-15] not yet complete, missing segment 15
+2026-07-29T08:14:41.554302Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:42.031952Z  INFO edge_manager::proof_state::result_handler: Batch [12-15] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:42.031999Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:44.417872Z  INFO edge_manager::proof_state::result_handler: Batch [16-19] not yet complete, missing segment 17
+2026-07-29T08:14:44.417921Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:44.864333Z  INFO edge_manager::proof_state::result_handler: Batch [16-19] not yet complete, missing segment 18
+2026-07-29T08:14:44.864474Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:47.193054Z  INFO edge_manager::proof_state::result_handler: Batch [16-19] not yet complete, missing segment 19
+2026-07-29T08:14:47.193113Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:47.615468Z  INFO edge_manager::proof_state::result_handler: Batch [16-19] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:47.615515Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:50.048735Z  INFO edge_manager::proof_state::result_handler: Batch [20-23] not yet complete, missing segment 21
+2026-07-29T08:14:50.048775Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:50.470311Z  INFO edge_manager::proof_state::result_handler: Batch [20-23] not yet complete, missing segment 22
+2026-07-29T08:14:50.470351Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:52.494059Z  INFO edge_manager::proof_state::result_handler: Batch [20-23] not yet complete, missing segment 23
+2026-07-29T08:14:52.494128Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:52.962737Z  INFO edge_manager::proof_state::result_handler: Batch [20-23] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:52.962784Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:55.017030Z  INFO edge_manager::proof_state::result_handler: Batch [24-27] not yet complete, missing segment 25
+2026-07-29T08:14:55.017059Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:55.428272Z  INFO edge_manager::proof_state::result_handler: Batch [24-27] not yet complete, missing segment 26
+2026-07-29T08:14:55.428311Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:57.429232Z  INFO edge_manager::proof_state::result_handler: Batch [24-27] not yet complete, missing segment 27
+2026-07-29T08:14:57.429276Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:14:57.844327Z  INFO edge_manager::proof_state::result_handler: Batch [24-27] complete! Creating leaf proof request with 4 app proofs
+2026-07-29T08:14:57.844377Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:15:00.109778Z  INFO edge_manager::proof_state::result_handler: Batch [28-31] not yet complete, missing segment 29
+2026-07-29T08:15:00.109818Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=app
+2026-07-29T08:15:01.895323Z ERROR edge_manager::proof_state::result_handler: Proof repro-01 failed at step unknown: Parallel app coordinator failed: Prover panicked: GPU allocation failed: Cuda(CudaError { code: 2, name: "cudaErrorMemoryAllocation", message: "out of memory" }); consumer failure(s): Prover panicked: GPU allocation failed: Cuda(CudaError { code: 2, name: "cudaErrorMemoryAllocation", message: "out of memory" })
+2026-07-29T08:15:01.895353Z  INFO edge_manager::handlers: Received result from worker 0: proof_uuid=repro-01, kind=error
+2026-07-29T08:16:10.152239Z  WARN edge_manager::handlers: Failing proof repro-01 forcing terminal via drain TTL; some workers never reported completion
+2026-07-29T08:16:10.152629Z  WARN edge_manager::handlers: Proof repro-01 completed without a final proof payload to persist
+2026-07-29T08:16:10.152987Z  INFO edge_manager::proof_state::metrics_report: Emitted metrics for proof repro-01: e2e=0ms, proving=0ms, app=74484ms, leaf=0ms, internal=0ms, compress=0ms
+2026-07-29T08:16:10.153127Z  WARN edge_manager::handlers: Failed to create metrics dir /data/metrics: Permission denied (os error 13)
+2026-07-29T08:16:10.153333Z  INFO edge_manager::handlers: Proof repro-01 reached terminal state Failed("step 'unknown' failed: Parallel app coordinator failed: Prover panicked: GPU allocation failed: Cuda(CudaError { code: 2, name: \"cudaErrorMemoryAllocation\", message: \"out of memory\" }); consumer failure(s): Prover panicked: GPU allocation failed: Cuda(CudaError { code: 2, name: \"cudaErrorMemoryAllocation\", message: \"out of memory\" })"), cleaning up scheduler state
