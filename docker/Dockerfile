@@ -156,9 +156,12 @@ LABEL com.axiom.stark_backend_rev="${STARK_BACKEND_REV}"
 # Re-declare the PROFILE argument to make it available in this stage
 ARG PROFILE=release
 
-# Copy the built binaries from the builder stage
+# Copy the built binaries from the builder stage. `convert_fixtures` derives a
+# deployment's proving keys and vmexe from a guest ELF, which a host runs once
+# before starting its workers.
 COPY --from=builder /app/target/$PROFILE/edge-manager .
 COPY --from=builder /app/target/$PROFILE/edge-worker .
+COPY --from=builder /app/target/$PROFILE/convert_fixtures .
 
 # Copy config files
 COPY config/ ./config/
