@@ -96,6 +96,15 @@ impl ProofStatus {
             ProofStatus::Canceled => "canceled",
         }
     }
+
+    /// Whether this is the proof's last status. `Failing` is not, since it
+    /// still becomes `Failed` once the workers drain.
+    pub fn is_settled(&self) -> bool {
+        matches!(
+            self,
+            ProofStatus::Completed | ProofStatus::Failed(_) | ProofStatus::Canceled
+        )
+    }
 }
 
 /// Complete state of an Edge proof, including the recursion tree.

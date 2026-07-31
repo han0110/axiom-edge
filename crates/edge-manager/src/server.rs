@@ -16,8 +16,8 @@ use tower_http::trace::TraceLayer;
 use crate::config::ManagerConfig;
 use crate::handlers::{
     cancel_proof, download_proof, download_vk, get_loadout, healthz, list_workers, proof_debug,
-    proof_result, proof_state, proof_timeout_watchdog_task, readyz_handler, register_worker,
-    start_proof, upload_input, AppState, PROOF_TIMEOUT_WATCHDOG_INTERVAL,
+    proof_events, proof_result, proof_state, proof_timeout_watchdog_task, readyz_handler,
+    register_worker, start_proof, upload_input, AppState, PROOF_TIMEOUT_WATCHDOG_INTERVAL,
 };
 
 /// Run the HTTP server.
@@ -77,6 +77,9 @@ pub async fn run_server(config: ManagerConfig) -> Result<()> {
         .route("/readyz", get(readyz_handler))
         .route("/loadout", get(get_loadout))
         .route("/proof_state/{proof_uuid}", get(proof_state))
+        // Server-sent status stream, so a caller follows a proof without
+        // polling /proof_state.
+        .route("/proof_events/{proof_uuid}", get(proof_events))
         .route("/proof_debug/{proof_uuid}", get(proof_debug))
         .route("/cancel_proof", post(cancel_proof))
         // Caller-facing downloads: per-program verifying-key blobs from the

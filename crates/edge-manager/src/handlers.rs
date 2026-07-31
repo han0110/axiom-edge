@@ -4,7 +4,10 @@ use axum::{
     body::Bytes,
     extract::{Multipart, Path, State},
     http::{header, StatusCode},
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use dashmap::DashMap;
@@ -1383,6 +1386,58 @@ pub async fn proof_state(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Proof not found"})),
         ),
+    }
+}
+
+/// How often `/proof_events` rechecks a proof's status. It reads the status
+/// rather than every writer publishing to it, since it is written from a dozen
+/// places across the scheduler and the result handler.
+const PROOF_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `GET /proof_events/{proof_uuid}` — the proof's status as server-sent events.
+///
+/// Emits the current status on subscribe, then one event per change, and ends
+/// the stream once the status settles. Each event carries only the status, so
+/// a subscriber never has to poll `/proof_state`. Subscribing after a change
+/// still yields the current status, which makes a reconnect safe.
+pub async fn proof_events(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> Response {
+    let Some(proof) = state.proof_states.get(&proof_uuid).map(|s| s.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Proof not found"})),
+        )
+            .into_response();
+    };
+
+    Sse::new(status_events(proof))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Emits `proof`'s status on subscribe and again on every change, ending once
+/// it settles.
+fn status_events(
+    proof: Arc<Mutex<ProofState>>,
+) -> impl futures::Stream<Item = Result<Event, axum::Error>> {
+    async_stream::try_stream! {
+        let mut last: Option<ProofStatus> = None;
+        loop {
+            let current = {
+                let guard = proof.lock().await;
+                guard.status.clone()
+            };
+            if last.as_ref() != Some(&current) {
+                yield Event::default().event("status").json_data(&current)?;
+                if current.is_settled() {
+                    break;
+                }
+                last = Some(current);
+            }
+            tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL).await;
+        }
     }
 }
 
