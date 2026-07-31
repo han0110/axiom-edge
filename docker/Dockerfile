@@ -103,6 +103,12 @@ ARG TARGET_CPU=native
 ARG TOOLCHAIN_VERSION
 ARG JEMALLOC_SYS_WITH_MALLOC_CONF
 
+# Naming the target keeps RUSTFLAGS off the build scripts and proc macros,
+# which cargo compiles for the host and executes during the build. Without it a
+# TARGET_CPU chosen for the deployment hardware also lands on those host
+# binaries and kills any build host missing the instructions they gain.
+ARG BUILD_TARGET=x86_64-unknown-linux-gnu
+
 # Pass CUDA_ARCH to the build script so it doesn't try to run nvidia-smi
 ENV CUDA_ARCH=${CUDA_ARCH}
 ENV RUSTFLAGS="-Ctarget-cpu=${TARGET_CPU}"
@@ -112,8 +118,8 @@ ENV JEMALLOC_SYS_WITH_MALLOC_CONF=${JEMALLOC_SYS_WITH_MALLOC_CONF}
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
-    cargo ${TOOLCHAIN_VERSION} chef cook --profile "$PROFILE" -p edge-worker --features "$FEATURES" --recipe-path recipe.json && \
-    cargo ${TOOLCHAIN_VERSION} chef cook --profile "$PROFILE" -p edge-manager --recipe-path recipe.json
+    cargo ${TOOLCHAIN_VERSION} chef cook --profile "$PROFILE" --target "$BUILD_TARGET" -p edge-worker --features "$FEATURES" --recipe-path recipe.json && \
+    cargo ${TOOLCHAIN_VERSION} chef cook --profile "$PROFILE" --target "$BUILD_TARGET" -p edge-manager --recipe-path recipe.json
 
 # Build the application, reusing dependency cache
 COPY . .
@@ -121,8 +127,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=$SCCACHE_DIR,sharing=locked \
     set -eu; \
     cargo ${TOOLCHAIN_VERSION} fetch --locked; \
-    cargo ${TOOLCHAIN_VERSION} build --profile "$PROFILE" -p edge-manager; \
-    cargo ${TOOLCHAIN_VERSION} build --profile "$PROFILE" -p edge-worker --features "$FEATURES"
+    cargo ${TOOLCHAIN_VERSION} build --profile "$PROFILE" --target "$BUILD_TARGET" -p edge-manager; \
+    cargo ${TOOLCHAIN_VERSION} build --profile "$PROFILE" --target "$BUILD_TARGET" -p edge-worker --features "$FEATURES"
 
 # Runtime: Final slim image
 FROM ${RUNTIME_IMAGE}
@@ -153,15 +159,17 @@ LABEL org.opencontainers.image.revision="${VCS_REF}"
 LABEL com.axiom.openvm_rev="${OPENVM_REV}"
 LABEL com.axiom.stark_backend_rev="${STARK_BACKEND_REV}"
 
-# Re-declare the PROFILE argument to make it available in this stage
+# Re-declare the PROFILE and BUILD_TARGET arguments to make them available in
+# this stage. Naming a target moves the build output under its triple.
 ARG PROFILE=release
+ARG BUILD_TARGET=x86_64-unknown-linux-gnu
 
 # Copy the built binaries from the builder stage. `convert_fixtures` derives a
 # deployment's proving keys and vmexe from a guest ELF, which a host runs once
 # before starting its workers.
-COPY --from=builder /app/target/$PROFILE/edge-manager .
-COPY --from=builder /app/target/$PROFILE/edge-worker .
-COPY --from=builder /app/target/$PROFILE/convert_fixtures .
+COPY --from=builder /app/target/$BUILD_TARGET/$PROFILE/edge-manager .
+COPY --from=builder /app/target/$BUILD_TARGET/$PROFILE/edge-worker .
+COPY --from=builder /app/target/$BUILD_TARGET/$PROFILE/convert_fixtures .
 
 # Copy config files
 COPY config/ ./config/
