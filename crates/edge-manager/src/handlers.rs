@@ -42,8 +42,15 @@ use std::collections::{BTreeMap, HashSet};
 /// Deferral maps are keyed by circuit index so uploads may arrive in any order.
 #[derive(Default)]
 pub struct StagedInputs {
-    /// bincode `StdIn` bytes for the main program input.
+    /// The main program input, either a bincode `StdIn` or the compact bytes
+    /// for a single logical input element (see [`Self::main_is_compact`]).
     pub main: Option<Bytes>,
+    /// Whether `main` holds compact guest bytes rather than a bincode `StdIn`.
+    /// Compact input is fanned out to the workers' `/upload_input_compact`,
+    /// which wraps it into a `StdIn` worker-side. This lets a caller that has
+    /// no OpenVM types on hand stage input on the manager, so it never needs
+    /// to reach the workers itself.
+    pub main_is_compact: bool,
     /// `DeferralState` bytes per circuit index.
     pub deferral_states: BTreeMap<usize, Bytes>,
     /// `DeferralInput` bytes per circuit index (retained until JIT dispatch).
@@ -174,6 +181,8 @@ fn validate_manager_proof_uuid(proof_uuid: &str) -> Result<(), &'static str> {
 ///
 /// Parts (all optional):
 /// - `input` — the bincode `StdIn` bytes (the main program input).
+/// - `input_compact` — the compact bytes for one logical input element, as an
+///   alternative to `input`. The workers wrap them into a `StdIn`.
 /// - `deferral_state_{i}` / `deferral_input_{i}` — one pair per deferral
 ///   circuit, at contiguous indices `0..N`. Omit entirely for a non-deferral
 ///   proof.
@@ -220,6 +229,10 @@ pub async fn upload_input(
 
         if name == "input" {
             staged.main = Some(bytes);
+            staged.main_is_compact = false;
+        } else if name == "input_compact" {
+            staged.main = Some(bytes);
+            staged.main_is_compact = true;
         } else if let Some(idx) = name.strip_prefix("deferral_state_") {
             match idx.parse::<usize>() {
                 Ok(i) => {
@@ -831,6 +844,19 @@ pub async fn start_proof(
         .await;
     }
 
+    // Deferral rides inside the `StdIn` the manager stages, so compact input
+    // cannot carry it — there is no `StdIn` to insert the deferral parts into.
+    if staged.main_is_compact && num_deferral_circuits > 0 {
+        return abort_proof_with_failure(
+            &state,
+            &proof_uuid,
+            "Compact input is incompatible with deferral. Stage the input as a \
+             bincode `StdIn` via the `input` part instead."
+                .to_string(),
+        )
+        .await;
+    }
+
     // Deferral is manager-staged only: it can't ride the worker-pre-uploaded
     // (Flow 1) transport.
     if req.input_already_uploaded && num_deferral_circuits > 0 {
@@ -844,6 +870,7 @@ pub async fn start_proof(
         .await;
     }
 
+    let main_is_compact = staged.main_is_compact;
     let input_data: Option<Vec<u8>> = if req.input_already_uploaded {
         info!(
             "Proof {} uses worker-pre-uploaded input (Flow 1); manager skips fan-out",
@@ -868,7 +895,13 @@ pub async fn start_proof(
         }
     };
 
-    // First, upload input to all workers if the manager holds it.
+    // First, upload input to all workers if the manager holds it. Compact
+    // bytes go to the worker endpoint that wraps them into a `StdIn`.
+    let input_endpoint = if main_is_compact {
+        "upload_input_compact"
+    } else {
+        "upload_input"
+    };
     if let Some(ref data) = input_data {
         // The fan-out begins and ends on this one clock, so the elapsed time is
         // the input-transfer cost with no cross-host skew in it.
@@ -890,7 +923,7 @@ pub async fn start_proof(
 
                 loop {
                     // proof_uuid rides in the URL path; body is the raw input.
-                    let url = format!("{}/upload_input/{}", worker_url, proof_uuid_clone);
+                    let url = format!("{worker_url}/{input_endpoint}/{proof_uuid_clone}");
                     let body = data_clone.clone();
 
                     match client
