@@ -3,12 +3,16 @@
 use axum::{
     body::Bytes,
     extract::{Multipart, Path, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -18,9 +22,9 @@ use crate::proof_state::{ProofResultEnvelopeOutcome, ProofState, ProofStatus};
 use crate::scheduler::{AssignedWork, EdgeStateStore};
 use crate::worker_registry::{app_eligible_workers, EdgeWorkerRegistry, RegisteredWorker};
 use protocol::{
-    GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef, ProofContext, ProofResult,
-    RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest, StartProofRequest, Step,
-    WithProofContext,
+    current_timestamp, GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef,
+    ProofContext, ProofResult, RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest,
+    StartProofRequest, Step, WithProofContext,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -89,6 +93,10 @@ pub struct AppState {
     /// (main + deferral states) and the final-internal JIT dispatch
     /// (deferral inputs). See [`StagedInputs`].
     pub staged_inputs: DashMap<String, StagedInputs>,
+    /// Root of the artifacts export mounted read-only into the container
+    /// (from `server.artifacts_path`, defaulting to `/data/artifacts`).
+    /// `GET /vk/{name}` serves per-program verification baselines from it.
+    pub artifacts_path: std::path::PathBuf,
 }
 
 impl AppState {
@@ -98,6 +106,12 @@ impl AppState {
             EdgeWorkerRegistry::new(config.server.num_workers, config.provers.clone());
         let state_store = EdgeStateStore::new(config.provers.max_leaf_provers);
         let programs_set: HashSet<ProgramRef> = programs.iter().cloned().collect();
+        // Root of the mounted artifacts export, served by `GET /vk/{name}`.
+        let artifacts_path = config
+            .server
+            .artifacts_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("/data/artifacts"));
         Self {
             config,
             worker_registry,
@@ -122,6 +136,7 @@ impl AppState {
             programs,
             programs_set,
             staged_inputs: DashMap::new(),
+            artifacts_path,
         }
     }
 }
@@ -250,6 +265,190 @@ pub async fn upload_input(
         proof_uuid, has_main, n_states, n_inputs
     );
     (StatusCode::OK, "Input staged".to_string())
+}
+
+/// Whether `name` is acceptable as a program name in a filesystem path.
+///
+/// Names are restricted to non-empty ASCII `[A-Za-z0-9._-]` with no `..`
+/// substring. Axum single-segment path params can never contain `/`, but the
+/// name becomes a filesystem path component, so it is validated here anyway
+/// (belt and braces against traversal).
+fn is_acceptable_program_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// The relative path of a program's verification baseline inside the mounted
+/// artifacts export.
+///
+/// `convert_fixtures keygen` writes `baseline.bin` beside the program's vmexe,
+/// so the layout matches the one the workers already load from.
+fn baseline_rel_path(name: &str, version: u32) -> String {
+    format!("programs/{name}/{version}/baseline.bin")
+}
+
+/// Download a program's verification baseline, the bitcode encoding of the
+/// openvm `VerificationBaseline`.
+///
+/// The baseline is a pure function of the guest ELF under the deployment's VM
+/// config, so a caller identifies a program by name and the loadout supplies
+/// the version. The manager serves the bytes verbatim and decodes nothing.
+pub async fn download_vk(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if !is_acceptable_program_name(&name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid program name"})),
+        )
+            .into_response();
+    }
+    // The loadout is the manager's only source of versions, so a name carrying
+    // two of them cannot be resolved from the path alone.
+    let versions: Vec<u32> = state
+        .programs
+        .iter()
+        .filter(|program| program.name == name)
+        .map(|program| program.version)
+        .collect();
+    let version = match versions.as_slice() {
+        [version] => *version,
+        [] => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("program '{name}' is not in the loadout")
+                })),
+            )
+                .into_response();
+        }
+        _ => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "program '{name}' has {} versions in the loadout, so a baseline cannot be selected by name",
+                        versions.len()
+                    )
+                })),
+            )
+                .into_response();
+        }
+    };
+    match tokio::fs::read(state.artifacts_path.join(baseline_rel_path(&name, version))).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("no baseline for program '{name}' on this deployment")
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("failed to read baseline for program '{name}': {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to read baseline"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Download an uncompressed final proof from persistent storage.
+///
+/// Disk is the source of truth, so proofs remain available after in-memory
+/// eviction or restart. Persistence-disabled and missing proofs return 404.
+pub async fn download_proof(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> impl IntoResponse {
+    if let Err(reason) = validate_manager_proof_uuid(&proof_uuid) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid proof_uuid: {reason}"),
+        )
+            .into_response();
+    }
+    let Some(dir) = state.config.proof.persist_final_proofs_dir.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "proof persistence is disabled".to_string(),
+        )
+            .into_response();
+    };
+    let stark_path = dir.join(format!("{proof_uuid}.proof.bin"));
+    let evm_path = dir.join(format!("{proof_uuid}.evm.bin"));
+    let (stark_exists, evm_exists) = match tokio::try_join!(
+        tokio::fs::try_exists(&stark_path),
+        tokio::fs::try_exists(&evm_path)
+    ) {
+        Ok(exists) => exists,
+        Err(e) => {
+            error!("failed to inspect persisted proof paths for {proof_uuid}: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("inspect persisted proof: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let path = match (stark_exists, evm_exists) {
+        (true, false) => stark_path,
+        (false, true) => evm_path,
+        (false, false) => {
+            return (StatusCode::NOT_FOUND, "proof not found".to_string()).into_response();
+        }
+        (true, true) => {
+            error!("both STARK and EVM persisted artifacts exist for {proof_uuid}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "multiple persisted proof artifacts found".to_string(),
+            )
+                .into_response();
+        }
+    };
+
+    // Read (and, if the deployment compresses persisted proofs, decompress) off
+    // the async executor — proofs can be multi-MB and zstd decode is CPU-bound.
+    let compressed = state.config.proof.compress_persisted_final_proofs;
+    let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let bytes = std::fs::read(&path)?;
+        if compressed {
+            zstd::decode_all(&bytes[..])
+        } else {
+            Ok(bytes)
+        }
+    })
+    .await;
+    match read {
+        Ok(Ok(bytes)) => (StatusCode::OK, bytes).into_response(),
+        Ok(Err(e)) => {
+            error!("failed to read persisted proof for {proof_uuid}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read persisted proof: {e}"),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!("persisted-proof read task failed for {proof_uuid}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("read task failed: {e}"),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Response for start_proof endpoint.
@@ -702,6 +901,10 @@ pub async fn start_proof(
 
     // First, upload input to all workers if the manager holds it.
     if let Some(ref data) = input_data {
+        // The fan-out begins and ends on this one clock, so the elapsed time is
+        // the input-transfer cost with no cross-host skew in it.
+        let fanout_started = Instant::now();
+        let fanout_bytes = data.len();
         let mut upload_handles = vec![];
         for (worker_id, worker) in &workers {
             let client = state.upload_client.clone(); // Use upload client with longer timeout
@@ -730,7 +933,10 @@ pub async fn start_proof(
                     {
                         Ok(resp) => {
                             if resp.status().is_success() {
-                                info!("Successfully uploaded input to worker {}", wid);
+                                info!(
+                                    "Successfully uploaded input to worker {} for proof {}",
+                                    wid, proof_uuid_clone
+                                );
                                 return Ok(wid);
                             }
                             // Non-success status, retry
@@ -789,6 +995,14 @@ pub async fn start_proof(
                 }
             }
         }
+
+        info!(
+            "Input fan-out complete for proof {}: workers={}, bytes={}, elapsed={}ms",
+            proof_uuid,
+            workers.len(),
+            fanout_bytes,
+            fanout_started.elapsed().as_millis()
+        );
 
         // If any uploads failed, abort the proof
         if !upload_failures.is_empty() {
@@ -925,7 +1139,13 @@ pub async fn start_proof(
                         error!("{}", msg);
                         Err(msg)
                     } else {
-                        info!("Work sent to worker {}", worker_id);
+                        info!(
+                            "Work sent to worker {} for proof {}: prover_id={}, num_provers={}",
+                            worker_id,
+                            work_request.proof_uuid,
+                            work_request.prover_id,
+                            work_request.num_provers
+                        );
                         Ok(())
                     }
                 }
@@ -1065,7 +1285,7 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
     // Process result and classify whether it was fresh, duplicate, or late.
     let outcome = {
         let mut guard = proof_state.lock().await;
-        match guard.handle_proof_result_with_envelope_outcome(payload.result) {
+        let outcome = match guard.handle_proof_result_with_envelope_outcome(payload.result) {
             Ok(outcome) => outcome,
             Err(e) => {
                 error!("Failed to handle proof result: {}", e);
@@ -1074,7 +1294,24 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
                     Json(serde_json::json!({"error": e.to_string()})),
                 );
             }
+        };
+        // Persist the final proof before releasing the lock. `/proof_state` and
+        // `/proof_events` read the status through this same mutex, so a caller
+        // that observes `completed` can always download the artifact it names.
+        // `finalize_proof` calls this again later and gets the cached path.
+        if matches!(guard.status, ProofStatus::Completed) {
+            if let Some(dir) = state.config.proof.persist_final_proofs_dir.as_ref() {
+                if let Err(e) = guard.persist_final_proof_to_disk(
+                    dir,
+                    state.config.proof.compress_persisted_final_proofs,
+                ) {
+                    error!("Failed to persist final proof {}: {}", proof_uuid, e);
+                    guard.status = ProofStatus::Failed(format!("persist final proof: {e}"));
+                    guard.notify_completion();
+                }
+            }
         }
+        outcome
     };
 
     let (follow_up_requests, transitioned_to_terminal) = match outcome {
@@ -1221,6 +1458,58 @@ pub async fn proof_state(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Proof not found"})),
         ),
+    }
+}
+
+/// How often `/proof_events` rechecks a proof's status. It reads the status
+/// rather than every writer publishing to it, since it is written from a dozen
+/// places across the scheduler and the result handler.
+const PROOF_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `GET /proof_events/{proof_uuid}` — the proof's status as server-sent events.
+///
+/// Emits the current status on subscribe, then one event per change, and ends
+/// the stream once the status settles. Each event carries only the status, so
+/// a subscriber never has to poll `/proof_state`. Subscribing after a change
+/// still yields the current status, which makes a reconnect safe.
+pub async fn proof_events(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> Response {
+    let Some(proof) = state.proof_states.get(&proof_uuid).map(|s| s.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Proof not found"})),
+        )
+            .into_response();
+    };
+
+    Sse::new(status_events(proof))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Emits `proof`'s status on subscribe and again on every change, ending once
+/// it settles.
+fn status_events(
+    proof: Arc<Mutex<ProofState>>,
+) -> impl futures::Stream<Item = Result<Event, axum::Error>> {
+    async_stream::try_stream! {
+        let mut last: Option<ProofStatus> = None;
+        loop {
+            let current = {
+                let guard = proof.lock().await;
+                guard.status.clone()
+            };
+            if last.as_ref() != Some(&current) {
+                yield Event::default().event("status").json_data(&current)?;
+                if current.is_settled() {
+                    break;
+                }
+                last = Some(current);
+            }
+            tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL).await;
+        }
     }
 }
 
@@ -1626,11 +1915,38 @@ async fn send_work_to_worker(client: &reqwest::Client, work: &AssignedWork) -> b
         }
     };
 
+    // The envelope timestamp is stamped when the result handler built this
+    // request, so the gap to now is how long the task waited on the manager for
+    // a free worker. The task descriptor repeats the identity the worker puts
+    // on its own span, which is what lets the two logs be joined.
+    let queue_wait_ms = current_timestamp().saturating_sub(work.envelope.timestamp);
+    let task = match &work.envelope.message {
+        GeneralProveRequest::LeafProve(req) => format!(
+            "segments=[{}, {}], children={}",
+            req.segment_start,
+            req.segment_end,
+            req.app_proofs.len()
+        ),
+        GeneralProveRequest::InternalProve(req) => format!(
+            "layer={}, segments=[{}, {}], children={}, is_final={}",
+            req.layer_idx,
+            req.segment_start,
+            req.segment_end,
+            req.child_proofs.len(),
+            req.is_final_proof
+        ),
+        GeneralProveRequest::EvmProve(req) => {
+            format!("has_deferral={}", req.proof_has_deferral)
+        }
+    };
+
     info!(
-        "Sending {} work to worker {} for proof {}",
+        "Sending {} work to worker {} for proof {}: {}, queue_wait={}ms",
         work.step.as_str(),
         work.worker_id,
-        work.proof_uuid
+        work.proof_uuid,
+        task,
+        queue_wait_ms
     );
 
     match client

@@ -74,6 +74,7 @@ fn build_manager_config(manager_port: u16) -> ManagerConfig {
         server: ManagerServerConfig {
             listen_addr: format!("127.0.0.1:{}", manager_port),
             num_workers: 1,
+            artifacts_path: None,
         },
         proof: ProofConfig::default(),
         provers: ManagerProversConfig {

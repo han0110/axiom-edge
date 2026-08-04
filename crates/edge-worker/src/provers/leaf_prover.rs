@@ -235,8 +235,11 @@ mod real_impl {
         let sub_metrics = telemetry::span_timing::drain_span_timings();
 
         info!(
-            "Generated leaf proof for segments [{}, {}] ({}ms)",
-            job.segment_start, job.segment_end, prove_time_ms
+            "Generated leaf proof for segments [{}, {}] ({}ms), spans={}",
+            job.segment_start,
+            job.segment_end,
+            prove_time_ms,
+            telemetry::span_timing::format_span_timings(&sub_metrics)
         );
 
         // Create the result structure - propagate user_public_values from app proofs.

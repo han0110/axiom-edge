@@ -83,3 +83,17 @@ where
 pub fn drain_span_timings() -> HashMap<String, f64> {
     CAPTURED_TIMINGS.with(|timings| std::mem::take(&mut *timings.borrow_mut()))
 }
+
+/// Render a drained span-timing map as a compact `{name=ms,...}` string for a
+/// single log line. Keys sort lexicographically and values round to whole
+/// milliseconds. An empty map renders as `{}`.
+pub fn format_span_timings(timings: &HashMap<String, f64>) -> String {
+    let mut entries: Vec<(&String, &f64)> = timings.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let inner = entries
+        .into_iter()
+        .map(|(name, ms)| format!("{}={:.0}", name, ms))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{}}}", inner)
+}

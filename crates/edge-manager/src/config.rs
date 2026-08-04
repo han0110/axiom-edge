@@ -25,6 +25,13 @@ pub struct ServerConfig {
     /// Total number of workers expected in the proving stack.
     /// Manager gates `/readyz` and `start_proof` on full registration.
     pub num_workers: usize,
+    /// Directory of the pre-provisioned artifacts export mounted read-only into
+    /// the container. `GET /vk/{name}` serves per-program verifying-key blobs
+    /// verbatim from its `vk/` subdir. When unset, defaults to the standard
+    /// `--from-artifacts` container mount `/data/artifacts`; a deployment
+    /// without such files simply answers `404` there.
+    #[serde(default)]
+    pub artifacts_path: Option<PathBuf>,
 }
 
 /// Per-worker prover capacity expected by every worker in the stack.
@@ -58,7 +65,7 @@ pub struct ProofConfig {
     #[serde(default = "default_leaf_pack_threshold")]
     pub leaf_pack_threshold: usize,
 
-    /// Optional directory where completed final proofs are persisted as bincode.
+    /// Optional directory for final proof persistence.
     #[serde(default)]
     pub persist_final_proofs_dir: Option<PathBuf>,
 

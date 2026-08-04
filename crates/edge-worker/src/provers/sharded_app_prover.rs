@@ -135,6 +135,7 @@ mod snapshot_schedule_tests {
 
 /// Execute sharded app proving for assigned segments.
 #[instrument(skip_all, fields(
+    proof_id = %job.context.proof_uuid,
     prover_id = job.prover_id,
     num_provers = job.num_provers,
     input_path = %job.input_path
@@ -276,7 +277,7 @@ mod real_impl {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Instant;
-    use tracing::error;
+    use tracing::{error, info_span, Span};
 
     /// On a deferral job, extract the depth-independent
     /// `(DEFERRAL_AS, 0)` authentication path from the final memory
@@ -425,10 +426,7 @@ mod real_impl {
     /// `StdIn` (today's path — `buffer` only) and grafts `deferrals` onto it
     /// from the per-circuit staged files. Non-deferral jobs round-trip
     /// byte-identically.
-    fn build_execution_stdin(
-        input_bytes: &[u8],
-        deferral_state_paths: &[String],
-    ) -> Result<StdIn> {
+    fn build_execution_stdin(input_bytes: &[u8], deferral_state_paths: &[String]) -> Result<StdIn> {
         let mut stdin: StdIn = bincode::deserialize(input_bytes)
             .map_err(|e| eyre::eyre!("Failed to deserialize input: {}", e))?;
         let deferrals = load_and_validate_deferral_states(deferral_state_paths)?;
@@ -506,7 +504,8 @@ mod real_impl {
     // state and makes its trace fail the LogUp argument. So we keep the exact
     // interpreter for fast-forward (a cheap ~1-segment replay) and use the
     // native rvr backend only for the expensive metered segment discovery.
-    type PureInstanceType = sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, ExecutionCtx>;
+    type PureInstanceType =
+        sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, ExecutionCtx>;
 
     // Metered (segment discovery) instance: interpreter by default; the native
     // rvr segment-boundary instance under `rvr` (the successor to the removed
@@ -516,7 +515,8 @@ mod real_impl {
     type MeteredInstanceType =
         sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, MeteredCtx>;
     #[cfg(feature = "rvr")]
-    type MeteredInstanceType = sdk_v2::openvm_circuit::arch::rvr::RvrMeteredSegmentInstance<'static>;
+    type MeteredInstanceType =
+        sdk_v2::openvm_circuit::arch::rvr::RvrMeteredSegmentInstance<'static>;
 
     /// Fast-forward `vm_state` by exactly `num_ins` instructions on the pure
     /// (interpreter) instance, returning the resulting VM state. Instruction-
@@ -598,7 +598,10 @@ mod real_impl {
             }
             #[cfg(feature = "rvr")]
             {
-                let vm_state = self.vm_state.take().expect("vm_state present between steps");
+                let vm_state = self
+                    .vm_state
+                    .take()
+                    .expect("vm_state present between steps");
                 let ctx = self.ctx.take().expect("ctx present between steps");
                 // A non-zero guest exit surfaces here as an `Err` (rvr
                 // `GuestExit`), matching the interpreter's explicit non-zero
@@ -734,6 +737,10 @@ mod real_impl {
         segment: Segment,
         segment_idx: usize,
         is_final: bool,
+        /// When the executor handed this segment to the bounded channel. The
+        /// gap to the moment a prover picks it up separates a prover-bound run
+        /// from an executor-bound one.
+        sent_at: Instant,
     }
 
     /// Result returned by the executor thread after execution completes.
@@ -918,6 +925,7 @@ mod real_impl {
     /// Execute sharded app proving using the provided per-program
     /// execution instances and a GPU prover loaded for the same program.
     #[instrument(skip_all, fields(
+        proof_id = %job.context.proof_uuid,
         prover_id = job.prover_id,
         num_provers = job.num_provers,
         input_path = %job.input_path
@@ -990,11 +998,15 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        // A spawned thread does not inherit the ambient span, so carry it over
+        // explicitly and every line the executor emits keeps its proof_id.
+        let executor_span = Span::current();
 
         // --- Executor thread ---
         // Runs metered execution, discovers segments, sends snapshots + metadata
         // to the prover via bounded channel. Continues executing while prover works.
         let executor_handle = std::thread::spawn(move || -> Result<ExecutorResult> {
+            let _executor_span = executor_span.enter();
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
             if seeds_initial_snapshot(prover_id) {
@@ -1033,6 +1045,7 @@ mod real_impl {
                             segment,
                             segment_idx: curr_idx,
                             is_final: should_break,
+                            sent_at: Instant::now(),
                         })
                         .map_err(|_| eyre::eyre!("Prover disconnected"))?;
                 }
@@ -1095,6 +1108,9 @@ mod real_impl {
         let mut prover_err: Option<eyre::Report> = None;
         for prove_data in prove_rx.iter() {
             info!("Prover: proving segment {}", prove_data.segment_idx);
+            // How long the segment sat in the bounded channel. Near zero means
+            // the provers keep up and the executor sets the pace.
+            let queue_wait_ms = prove_data.sent_at.elapsed().as_millis() as u64;
             let segment_start = std::time::Instant::now();
 
             // Fast-forward from snapshot to segment start
@@ -1201,6 +1217,7 @@ mod real_impl {
                 }
             }
 
+            let spans = telemetry::span_timing::format_span_timings(&sub_metrics);
             let app_proof = ProofResult::App(AppProof {
                 context: job.context.clone(),
                 state: AppProofState {
@@ -1219,8 +1236,13 @@ mod real_impl {
             });
 
             info!(
-                "Prover: generated app proof for segment {} ({}ms)",
-                prove_data.segment_idx, prove_time_ms
+                "Prover: generated app proof for segment {}: queue_wait={}ms, fastfwd={}ms, stark={}ms, prove={}ms, spans={}",
+                prove_data.segment_idx,
+                queue_wait_ms,
+                fastfwd_time_ms,
+                stark_prove_time_ms,
+                prove_time_ms,
+                spans
             );
 
             if let Some(ref tx) = job.result_tx {
@@ -1305,6 +1327,9 @@ mod real_impl {
 
         for prove_data in prove_rx.iter() {
             info!("Consumer: proving segment {}", prove_data.segment_idx);
+            // How long the segment sat in the bounded channel. Near zero means
+            // the provers keep up and the executor sets the pace.
+            let queue_wait_ms = prove_data.sent_at.elapsed().as_millis() as u64;
             let segment_start = std::time::Instant::now();
 
             // Fast-forward from snapshot to segment start
@@ -1412,8 +1437,13 @@ mod real_impl {
             }
 
             info!(
-                "Consumer: proved segment {} ({}ms)",
-                prove_data.segment_idx, prove_time_ms
+                "Consumer: proved segment {}: queue_wait={}ms, fastfwd={}ms, stark={}ms, prove={}ms, spans={}",
+                prove_data.segment_idx,
+                queue_wait_ms,
+                fastfwd_time_ms,
+                stark_prove_time_ms,
+                prove_time_ms,
+                telemetry::span_timing::format_span_timings(&sub_metrics)
             );
 
             let encoded_proof = match proof::encode_proof(&ProofWithPublicValue {
@@ -1476,13 +1506,23 @@ mod real_impl {
         // Create N-1 consumer closures
         let is_deferral_job = !job.deferral_state_paths.is_empty();
         let mut consumers: Vec<SegmentConsumerFn> = Vec::new();
-        for _ in 1..max_app_provers {
+        for consumer_idx in 1..max_app_provers {
             let consumer_prove_rx = prove_rx.clone();
             let consumer_streaming_tx = streaming_tx.clone();
             let context = job.context.clone();
+            // Consumers run on long-lived pool threads that carry no ambient
+            // span, so each gets its own and every segment line it emits is
+            // attributable to a proof and a prover.
+            let consumer_span = info_span!(
+                "app_consumer",
+                proof_id = %job.context.proof_uuid,
+                prover_id = job.prover_id,
+                consumer_idx
+            );
 
             consumers.push(Box::new(
                 move |instances: &AppExecutionInstances, prover: &mut ProverType| {
+                    let _consumer_span = consumer_span.enter();
                     consume_segments_loop(
                         instances,
                         prover,
@@ -1514,6 +1554,11 @@ mod real_impl {
     /// 1. Reads input and creates the executor thread (feeds segments via prove_tx)
     /// 2. Acts as consumer-0 (proves segments from prove_rx)
     /// 3. Streams results via job.result_tx as each segment completes
+    #[instrument(skip_all, fields(
+        proof_id = %job.context.proof_uuid,
+        prover_id = job.prover_id,
+        num_provers = job.num_provers
+    ))]
     fn coordinate_parallel_prove(
         job: ShardedAppProverJob,
         instances: &AppExecutionInstances,
@@ -1537,20 +1582,29 @@ mod real_impl {
             "Parallel coordinator: prover_id={}, num_provers={}, max_app_provers={}",
             job.prover_id, job.num_provers, job.max_app_provers
         );
+        let setup_start = std::time::Instant::now();
 
         // Read input from disk
+        let input_read_start = std::time::Instant::now();
         let input_bytes = std::fs::read(&job.input_path)
             .map_err(|e| eyre::eyre!("Failed to read input file {}: {}", job.input_path, e))?;
+        let input_read_ms = input_read_start.elapsed().as_millis();
+        let stdin_start = std::time::Instant::now();
         let stdin = build_execution_stdin(&input_bytes, &job.deferral_state_paths)?;
+        let stdin_ms = stdin_start.elapsed().as_millis();
         let is_deferral_job = !job.deferral_state_paths.is_empty();
 
         let exe = instances.exe.as_ref();
         let vm_config = &instances.vm_config;
         let execution_instances = instances.execution_instances.clone();
 
+        let metered_ctx_start = std::time::Instant::now();
         let metered_ctx = build_metered_ctx(app_prover, exe, job.segment_memory);
+        let metered_ctx_ms = metered_ctx_start.elapsed().as_millis();
 
+        let vm_state_start = std::time::Instant::now();
         let vm_state = execution_instances.metered.create_initial_vm_state(stdin);
+        let vm_state_ms = vm_state_start.elapsed().as_millis();
 
         let num_provers = job.num_provers;
         let prover_id = job.prover_id;
@@ -1561,22 +1615,37 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        // A spawned thread does not inherit the ambient span, so carry it over
+        // explicitly and every line the executor emits keeps its proof_id.
+        let executor_span = Span::current();
 
         // --- Executor thread ---
         // Same as single-threaded version: discovers segments, sends via shared channel
         let executor_handle = std::thread::spawn(move || -> Result<ExecutorResult> {
+            let _executor_span = executor_span.enter();
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
+            let snapshot_clone_start = std::time::Instant::now();
             if seeds_initial_snapshot(prover_id) {
                 snapshots.push_back(VmSnapshot {
                     vm_state: vm_state.clone(),
                     instret: 0,
                 });
             }
+            let snapshot_clone_ms = snapshot_clone_start.elapsed().as_millis();
 
             let mut driver = MeteredDriver::new(metered_interpreter, vm_state, metered_ctx);
             let exec_start = std::time::Instant::now();
 
+            info!(
+                "VM setup: input_read={}ms, stdin={}ms, metered_ctx={}ms, vm_state={}ms, snapshot_clone={}ms, total={}ms",
+                input_read_ms,
+                stdin_ms,
+                metered_ctx_ms,
+                vm_state_ms,
+                snapshot_clone_ms,
+                setup_start.elapsed().as_millis()
+            );
             info!("Executor thread (parallel): starting metered execution");
 
             loop {
@@ -1605,6 +1674,7 @@ mod real_impl {
                             segment,
                             segment_idx: curr_idx,
                             is_final: should_break,
+                            sent_at: Instant::now(),
                         })
                         .map_err(|_| eyre::eyre!("All prover consumers disconnected"))?;
                 }
@@ -1669,6 +1739,9 @@ mod real_impl {
                 "Coordinator-consumer: proving segment {}",
                 prove_data.segment_idx
             );
+            // How long the segment sat in the bounded channel. Near zero means
+            // the provers keep up and the executor sets the pace.
+            let queue_wait_ms = prove_data.sent_at.elapsed().as_millis() as u64;
             let segment_start = std::time::Instant::now();
 
             let fastfwd_start = std::time::Instant::now();
@@ -1770,6 +1843,7 @@ mod real_impl {
                 }
             }
 
+            let spans = telemetry::span_timing::format_span_timings(&sub_metrics);
             let app_proof = ProofResult::App(AppProof {
                 context: job.context.clone(),
                 state: AppProofState {
@@ -1788,8 +1862,13 @@ mod real_impl {
             });
 
             info!(
-                "Coordinator-consumer: proved segment {} ({}ms)",
-                prove_data.segment_idx, prove_time_ms
+                "Coordinator-consumer: proved segment {}: queue_wait={}ms, fastfwd={}ms, stark={}ms, prove={}ms, spans={}",
+                prove_data.segment_idx,
+                queue_wait_ms,
+                fastfwd_time_ms,
+                stark_prove_time_ms,
+                prove_time_ms,
+                spans
             );
 
             if let Some(ref tx) = job.result_tx {

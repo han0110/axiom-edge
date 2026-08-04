@@ -40,7 +40,13 @@ use {
 pub const EDGE_OPENVM_CONFIG_ENV: &str = "EDGE_OPENVM_CONFIG";
 
 const VM_MAX_CONSTRAINT_DEGREE: usize = 3;
-const VM_NUM_PUBLIC_VALUES: usize = 32;
+/// Matches the count ere's verifier is built against, which rejects a proof
+/// whose public-values length differs. `with_public_values` counts u16 memory
+/// cells, so 128 cells carry the 256 public-value bytes ere expects. A
+/// deployment that assigns its program up front derives its keyset from this
+/// config rather than from one the client sends, so the two counts have to
+/// agree here.
+const VM_NUM_PUBLIC_VALUES: usize = 128;
 
 /// Build the edge's `SdkVmConfig`.
 ///
