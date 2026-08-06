@@ -119,20 +119,22 @@ openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git"
 openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2.1.0", default-features = false }
 openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2.1.0", default-features = false }
 
-# OpenVM. Temporarily pinned to the `feat/rvr-preflight` branch — an unmerged
-# branch on top of `develop-v2.1.0` (it still carries the recompute-touched-pages
-# + rvr `!= 0` fixes). Revert to `branch = "develop-v2.1.0"` once it merges.
-# stark-backend above stays on `develop-v2.1.0` (the branch's own dep ref), so
-# the single `links = "cuda-common"` source is still shared.
-sdk-v2 = { package = "openvm-sdk", git = "https://github.com/openvm-org/openvm.git", branch = "feat/rvr-preflight", default-features = false }
-continuations-v2 = { package = "openvm-continuations", git = "https://github.com/openvm-org/openvm.git", branch = "feat/rvr-preflight", default-features = false }
-openvm-sdk-config = { git = "https://github.com/openvm-org/openvm.git", branch = "feat/rvr-preflight", default-features = false }
-verify-stark = { package = "openvm-verify-stark-host", git = "https://github.com/openvm-org/openvm.git", branch = "feat/rvr-preflight", default-features = false }
+# OpenVM. Pinned to a `develop-v2.1.0` revision rather than the branch head:
+# this is the last commit before #3087 removed columns from `XorinVmAir`, so the
+# verifying key still matches the one the `v2.1.0-preview`.
+# The revision carries #3082, which stops the rvr shared libraries from
+# exporting their static extension symbols. Its stark-backend dependency is the
+# `develop-v2.1.0` branch pinned above, so the single `links = "cuda-common"`
+# source is used throughout the graph.
+sdk-v2 = { package = "openvm-sdk", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
+continuations-v2 = { package = "openvm-continuations", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
+openvm-sdk-config = { git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
+verify-stark = { package = "openvm-verify-stark-host", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
 # Test-only dep for the deferral self-recursion e2e in
 # `edge-integration-tests`: `get_deferral_state` / `get_raw_deferral_results`
 # for caller-side input prep, mirroring the openvm
 # `tests::test_verify_stark_deferral` harness. Not used outside tests.
-openvm-verify-stark-circuit = { git = "https://github.com/openvm-org/openvm.git", branch = "feat/rvr-preflight", default-features = false }
+openvm-verify-stark-circuit = { git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
 
 # Testing
 tempfile = "3.13.0"
