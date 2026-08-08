@@ -1461,9 +1461,11 @@ pub async fn proof_state(
     }
 }
 
-/// How often `/proof_events` rechecks a proof's status. It reads the status
-/// rather than every writer publishing to it, since it is written from a dozen
-/// places across the scheduler and the result handler.
+/// Bounds how long `/proof_events` waits before rechecking a proof's status.
+/// A completion notification wakes the wait immediately, so this only
+/// backstops transitions that reach the status without notifying, which the
+/// status invites by being written from a dozen places across the scheduler
+/// and the result handler.
 const PROOF_EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// `GET /proof_events/{proof_uuid}` — the proof's status as server-sent events.
@@ -1495,8 +1497,15 @@ fn status_events(
     proof: Arc<Mutex<ProofState>>,
 ) -> impl futures::Stream<Item = Result<Event, axum::Error>> {
     async_stream::try_stream! {
+        let notifier = proof.lock().await.completion_notifier();
         let mut last: Option<ProofStatus> = None;
         loop {
+            // Registered before the status read so a completion landing
+            // between the read and the wait still wakes it.
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             let current = {
                 let guard = proof.lock().await;
                 guard.status.clone()
@@ -1508,7 +1517,10 @@ fn status_events(
                 }
                 last = Some(current);
             }
-            tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL).await;
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL) => {}
+            }
         }
     }
 }
@@ -2277,4 +2289,73 @@ async fn abort_proof_with_failure(
             "proof_uuid": proof_uuid,
         })),
     )
+}
+
+#[cfg(test)]
+mod status_event_tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn in_progress_proof() -> Arc<Mutex<ProofState>> {
+        let context = ProofContext::new(
+            "p-events".to_string(),
+            ProgramRef::new("test-program", 1),
+            Default::default(),
+        );
+        Arc::new(Mutex::new(ProofState::new(
+            context, 1_000_000, 1, 4, 3, 300,
+        )))
+    }
+
+    /// Settling reaches a subscriber through the completion notifier, so the
+    /// event lands well inside one poll interval rather than waiting for it.
+    #[tokio::test]
+    async fn settling_wakes_the_stream_before_the_poll_interval() {
+        let proof = in_progress_proof();
+        let stream = status_events(proof.clone());
+        futures::pin_mut!(stream);
+
+        // Subscribing reports the current status right away.
+        stream.next().await.expect("initial status").expect("event");
+
+        let settler = proof.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let mut guard = settler.lock().await;
+            guard.status = ProofStatus::Completed;
+            guard.notify_completion();
+        });
+
+        let started = Instant::now();
+        stream.next().await.expect("settled status").expect("event");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < PROOF_EVENT_POLL_INTERVAL / 2,
+            "settled event took {elapsed:?}, so the poll backstop delivered it instead of the notifier"
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "the stream ends once settled"
+        );
+    }
+
+    /// A transition that never notifies still reaches the subscriber, which is
+    /// what keeps the poll backstop necessary.
+    #[tokio::test]
+    async fn poll_backstop_delivers_an_unnotified_settle() {
+        let proof = in_progress_proof();
+        let stream = status_events(proof.clone());
+        futures::pin_mut!(stream);
+
+        stream.next().await.expect("initial status").expect("event");
+
+        proof.lock().await.status = ProofStatus::Failed("no notify".to_string());
+
+        stream.next().await.expect("settled status").expect("event");
+        assert!(
+            stream.next().await.is_none(),
+            "the stream ends once settled"
+        );
+    }
 }
