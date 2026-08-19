@@ -112,12 +112,12 @@ strum = { version = "0.27.1", features = ["derive"] }
 # links value"), and Cargo refuses to [patch] a git source with its own repo
 # URL ("patches must point to different sources"). Keep this branch in lockstep
 # with the openvm branch below.
-openvm-stark-sdk = { git = "https://github.com/openvm-org/stark-backend.git", default-features = false, branch = "develop-v2.1.0", features = [
+openvm-stark-sdk = { git = "https://github.com/han0110/stark-backend.git", default-features = false, branch = "patch/v2.0.1", features = [
     "metrics",
 ] }
-openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", default-features = false, branch = "develop-v2.1.0" }
-openvm-cuda-backend = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2.1.0", default-features = false }
-openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", branch = "develop-v2.1.0", default-features = false }
+openvm-stark-backend = { git = "https://github.com/han0110/stark-backend.git", default-features = false, branch = "patch/v2.0.1" }
+openvm-cuda-backend = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/v2.0.1", default-features = false }
+openvm-cuda-common = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/v2.0.1", default-features = false }
 
 # OpenVM. Pinned to a `develop-v2.1.0` revision rather than the branch head:
 # this is the last commit before #3087 removed columns from `XorinVmAir`, so the
@@ -126,15 +126,15 @@ openvm-cuda-common = { git = "https://github.com/openvm-org/stark-backend.git", 
 # exporting their static extension symbols. Its stark-backend dependency is the
 # `develop-v2.1.0` branch pinned above, so the single `links = "cuda-common"`
 # source is used throughout the graph.
-sdk-v2 = { package = "openvm-sdk", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
-continuations-v2 = { package = "openvm-continuations", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
-openvm-sdk-config = { git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
-verify-stark = { package = "openvm-verify-stark-host", git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
+sdk-v2 = { package = "openvm-sdk", git = "https://github.com/han0110/openvm.git", rev = "9faf479821a3beb081bc863608852a19941fa0a0", default-features = false }
+continuations-v2 = { package = "openvm-continuations", git = "https://github.com/han0110/openvm.git", rev = "9faf479821a3beb081bc863608852a19941fa0a0", default-features = false }
+openvm-sdk-config = { git = "https://github.com/han0110/openvm.git", rev = "9faf479821a3beb081bc863608852a19941fa0a0", default-features = false }
+verify-stark = { package = "openvm-verify-stark-host", git = "https://github.com/han0110/openvm.git", rev = "9faf479821a3beb081bc863608852a19941fa0a0", default-features = false }
 # Test-only dep for the deferral self-recursion e2e in
 # `edge-integration-tests`: `get_deferral_state` / `get_raw_deferral_results`
 # for caller-side input prep, mirroring the openvm
 # `tests::test_verify_stark_deferral` harness. Not used outside tests.
-openvm-verify-stark-circuit = { git = "https://github.com/openvm-org/openvm.git", rev = "39c8462c52dfbc44b9a89596f5124a7bf18f4a70", default-features = false }
+openvm-verify-stark-circuit = { git = "https://github.com/han0110/openvm.git", rev = "9faf479821a3beb081bc863608852a19941fa0a0", default-features = false }
 
 # Testing
 tempfile = "3.13.0"
@@ -166,3 +166,7 @@ lto = "fat"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+[patch."https://github.com/openvm-org/stark-backend.git"]
+openvm-cuda-common = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/v2.0.1" }
+openvm-cuda-builder = { git = "https://github.com/han0110/stark-backend.git", branch = "patch/v2.0.1" }
