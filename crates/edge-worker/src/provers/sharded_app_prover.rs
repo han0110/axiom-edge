@@ -978,7 +978,11 @@ mod real_impl {
         let execution_instances = instances.execution_instances.clone();
         let metered_ctx = build_metered_ctx(app_prover, exe, job.segment_memory);
 
-        // Create initial VM state
+        // Create initial VM state. Cloning a built state copies the whole guest memory
+        // image, so the executor builds the seed from a copy of the input instead.
+        // `create_initial_vm_state` is a pure function of the instance and the input, so
+        // the two states agree.
+        let seed_stdin = seeds_initial_snapshot(job.prover_id).then(|| stdin.clone());
         let vm_state = execution_instances.metered.create_initial_vm_state(stdin);
 
         // Bounded channel: executor -> prover. Backpressure when channel is full
@@ -1005,9 +1009,9 @@ mod real_impl {
             let _executor_span = executor_span.enter();
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
-            if seeds_initial_snapshot(prover_id) {
+            if let Some(seed_stdin) = seed_stdin {
                 snapshots.push_back(VmSnapshot {
-                    vm_state: vm_state.clone(),
+                    vm_state: metered_interpreter.create_initial_vm_state(seed_stdin),
                     instret: 0,
                 });
             }
@@ -1600,6 +1604,11 @@ mod real_impl {
         let metered_ctx = build_metered_ctx(app_prover, exe, job.segment_memory);
         let metered_ctx_ms = metered_ctx_start.elapsed().as_millis();
 
+        // Cloning a built state copies the whole guest memory image, so the executor
+        // builds the seed from a copy of the input instead. `create_initial_vm_state`
+        // is a pure function of the instance and the input, so the two states agree.
+        let seed_stdin = seeds_initial_snapshot(job.prover_id).then(|| stdin.clone());
+
         let vm_state_start = std::time::Instant::now();
         let vm_state = execution_instances.metered.create_initial_vm_state(stdin);
         let vm_state_ms = vm_state_start.elapsed().as_millis();
@@ -1623,25 +1632,25 @@ mod real_impl {
             let _executor_span = executor_span.enter();
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
-            let snapshot_clone_start = std::time::Instant::now();
-            if seeds_initial_snapshot(prover_id) {
+            let seed_state_start = std::time::Instant::now();
+            if let Some(seed_stdin) = seed_stdin {
                 snapshots.push_back(VmSnapshot {
-                    vm_state: vm_state.clone(),
+                    vm_state: metered_interpreter.create_initial_vm_state(seed_stdin),
                     instret: 0,
                 });
             }
-            let snapshot_clone_ms = snapshot_clone_start.elapsed().as_millis();
+            let seed_state_ms = seed_state_start.elapsed().as_millis();
 
             let mut driver = MeteredDriver::new(metered_interpreter, vm_state, metered_ctx);
             let exec_start = std::time::Instant::now();
 
             info!(
-                "VM setup: input_read={}ms, stdin={}ms, metered_ctx={}ms, vm_state={}ms, snapshot_clone={}ms, total={}ms",
+                "VM setup: input_read={}ms, stdin={}ms, metered_ctx={}ms, vm_state={}ms, seed_state={}ms, total={}ms",
                 input_read_ms,
                 stdin_ms,
                 metered_ctx_ms,
                 vm_state_ms,
-                snapshot_clone_ms,
+                seed_state_ms,
                 setup_start.elapsed().as_millis()
             );
             info!("Executor thread (parallel): starting metered execution");
