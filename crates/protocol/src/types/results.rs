@@ -33,6 +33,18 @@ impl ProofResult {
             ProofResult::Error(_) => "error",
         }
     }
+
+    /// Record the worker and the receipt time on the carried state.
+    pub fn stamp(&mut self, worker_id: usize, completed_at_ms: u64) {
+        let (state_worker_id, state_completed_at_ms) = match self {
+            ProofResult::App(r) => (&mut r.state.worker_id, &mut r.state.completed_at_ms),
+            ProofResult::Leaf(r) => (&mut r.state.worker_id, &mut r.state.completed_at_ms),
+            ProofResult::Internal(r) => (&mut r.state.worker_id, &mut r.state.completed_at_ms),
+            ProofResult::ExecuteE2(_) | ProofResult::Evm(_) | ProofResult::Error(_) => return,
+        };
+        *state_worker_id = worker_id;
+        *state_completed_at_ms = completed_at_ms;
+    }
 }
 
 impl WithProofContext for ProofResult {
@@ -144,6 +156,13 @@ pub struct AppProofState {
     /// Time spent generating the STARK proof, in milliseconds.
     #[serde(default)]
     pub stark_prove_time_ms: u64,
+    /// Time the segment sat in the channel between the executor and the prover, in milliseconds.
+    #[serde(default)]
+    pub queue_wait_ms: u64,
+    /// Time of the executor of this worker between the end of the previous send of this worker and
+    /// this send, in milliseconds. It covers every segment executed since that send.
+    #[serde(default)]
+    pub metered_time_ms: u64,
     /// STARK sub-step timings captured from tracing spans (e.g., trace_gen_time_ms).
     #[serde(default)]
     pub sub_metrics: HashMap<String, f64>,
@@ -168,6 +187,12 @@ pub struct AppProofState {
     /// `None` otherwise; opaque on the wire.
     #[serde(default)]
     pub deferral_merkle_proofs_bytes: Option<Vec<u8>>,
+    /// Worker that produced the result, set by the manager on receipt.
+    #[serde(default)]
+    pub worker_id: usize,
+    /// Manager clock at receipt, in milliseconds since the epoch.
+    #[serde(default)]
+    pub completed_at_ms: u64,
 }
 
 /// Leaf proof aggregating multiple app proofs.
@@ -191,6 +216,12 @@ pub struct LeafProofState {
     /// STARK sub-step timings captured from tracing spans.
     #[serde(default)]
     pub sub_metrics: HashMap<String, f64>,
+    /// Worker that produced the result, set by the manager on receipt.
+    #[serde(default)]
+    pub worker_id: usize,
+    /// Manager clock at receipt, in milliseconds since the epoch.
+    #[serde(default)]
+    pub completed_at_ms: u64,
 }
 
 /// Internal proof aggregating leaf or other internal proofs.
@@ -219,6 +250,9 @@ pub struct InternalProofState {
     /// STARK sub-step timings captured from tracing spans.
     #[serde(default)]
     pub sub_metrics: HashMap<String, f64>,
+    /// Span durations of the final proof wrap, empty when no wrap ran on this task.
+    #[serde(default)]
+    pub wrap_sub_metrics: HashMap<String, f64>,
     /// Deferral-only, final-internal-only: the `DeferralMerkleProofs` for the
     /// merged final internal proof, encoded via
     /// `verify_stark::deferral::DeferralMerkleProofs::encode` (the stark-backend
@@ -246,6 +280,12 @@ pub struct InternalProofState {
     /// `false` value means no `EvmProve` is dispatched.
     #[serde(default)]
     pub ready_for_evm: bool,
+    /// Worker that produced the result, set by the manager on receipt.
+    #[serde(default)]
+    pub worker_id: usize,
+    /// Manager clock at receipt, in milliseconds since the epoch.
+    #[serde(default)]
+    pub completed_at_ms: u64,
 }
 
 /// Root proof state — the worker-internal payload of the root prove stage.

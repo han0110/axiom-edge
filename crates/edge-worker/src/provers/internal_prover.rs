@@ -100,10 +100,13 @@ fn prove_internal_impl(job: InternalProverJob) -> Result<Vec<ProofResult>> {
             prove_time_ms,
             compression_time_ms,
             sub_metrics: std::collections::HashMap::new(),
+            wrap_sub_metrics: std::collections::HashMap::new(),
             deferral_merkle_proofs_bytes: None,
             // The prover emits the raw internal proof; the dedicated-mode
             // ready-for-evm flag is set later by the handler, not here.
             ready_for_evm: false,
+            worker_id: 0,
+            completed_at_ms: 0,
         },
     };
 
@@ -301,7 +304,7 @@ mod real_impl {
         };
 
         let prove_time_ms = agg_start.elapsed().as_millis() as u64;
-        let mut sub_metrics = telemetry::span_timing::drain_span_timings();
+        let sub_metrics = telemetry::span_timing::drain_span_timings();
 
         // Skip the `is_final_proof` wrap only when THIS proof carries a
         // deferral tail — the tail merge's `wrap_proof` supplies the
@@ -319,6 +322,7 @@ mod real_impl {
         // `openvm/crates/continuations/src/prover/inner/mod.rs:99–109`), which
         // is exactly right for the non-deferral wrap.
         let skip_wrap_for_deferral = job.is_final_proof && job.proof_has_deferral;
+        let mut wrap_sub_metrics = std::collections::HashMap::new();
         let (final_proof, compression_time_ms) = if job.is_final_proof && !skip_wrap_for_deferral {
             info!("Wrapping final internal proof...");
             assert!(
@@ -337,10 +341,7 @@ mod real_impl {
                     ChildVkKind::RecursiveSelf,
                 )?;
             let wrap_time_ms = wrap_start.elapsed().as_millis() as u64;
-            // Merge wrap sub-step timings into sub_metrics
-            for (k, v) in telemetry::span_timing::drain_span_timings() {
-                *sub_metrics.entry(k).or_insert(0.0) += v;
-            }
+            wrap_sub_metrics = telemetry::span_timing::drain_span_timings();
             info!(
                 "Final internal proof wrapped successfully ({}ms)",
                 wrap_time_ms
@@ -358,10 +359,11 @@ mod real_impl {
         };
 
         info!(
-            "Generated internal proof: layer={}, segment=[{}, {}], is_final={}, prove={}ms, compress={}ms, spans={}",
+            "Generated internal proof: layer={}, segment=[{}, {}], is_final={}, prove={}ms, compress={}ms, spans={}, wrap_spans={}",
             job.layer_idx, job.segment_start, job.segment_end, job.is_final_proof,
             prove_time_ms, compression_time_ms,
-            telemetry::span_timing::format_span_timings(&sub_metrics)
+            telemetry::span_timing::format_span_timings(&sub_metrics),
+            telemetry::span_timing::format_span_timings(&wrap_sub_metrics)
         );
 
         // Create the result structure - propagate user_public_values from child proofs.
@@ -380,6 +382,7 @@ mod real_impl {
                 prove_time_ms,
                 compression_time_ms,
                 sub_metrics,
+                wrap_sub_metrics,
                 // The internal prover never merges deferral tails; for a
                 // stark-mode deferral job the handler runs the merge on the
                 // final internal proof and sets this field there.
@@ -387,6 +390,8 @@ mod real_impl {
                 // Raw internal proof; the ready-for-evm flag (and the
                 // post-merge proof/merkle it carries) is set by the handler.
                 ready_for_evm: false,
+                worker_id: 0,
+                completed_at_ms: 0,
             },
         };
 

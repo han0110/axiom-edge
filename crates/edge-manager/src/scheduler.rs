@@ -841,9 +841,13 @@ mod tests {
                 prove_time_ms: 0,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: 0,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
             },
         })
     }
@@ -1212,6 +1216,8 @@ mod tests {
                 segment_end: 3,
                 prove_time_ms: 0,
                 sub_metrics: HashMap::new(),
+                worker_id: 0,
+                completed_at_ms: 0,
             },
         });
         store.worker_drained("p1", 0, &leaf_result).await.unwrap();

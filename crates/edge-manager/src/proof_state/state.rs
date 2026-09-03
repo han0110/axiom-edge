@@ -532,6 +532,70 @@ impl ProofState {
         }
     }
 
+    /// Create the task timeline for API responses. The view carries no proof
+    /// bytes and no EVM proof. It also holds no execute record.
+    pub fn to_pipeline(&self) -> ProofPipeline {
+        let mut app_proofs: Vec<TaskTiming> = self
+            .app_proofs
+            .values()
+            .map(|s| TaskTiming {
+                worker_id: s.worker_id,
+                completed_at_ms: s.completed_at_ms,
+                segment_start: s.segment_idx,
+                segment_end: s.segment_idx,
+                queue_wait_ms: s.queue_wait_ms,
+                metered_time_ms: s.metered_time_ms,
+                prove_time_ms: s.prove_time_ms,
+                fastfwd_time_ms: s.fastfwd_time_ms,
+                stark_prove_time_ms: s.stark_prove_time_ms,
+                sub_metrics: s.sub_metrics.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let mut leaf_proofs: Vec<TaskTiming> = self
+            .leaf_proofs
+            .values()
+            .map(|s| TaskTiming {
+                worker_id: s.worker_id,
+                completed_at_ms: s.completed_at_ms,
+                segment_start: s.segment_start,
+                segment_end: s.segment_end,
+                prove_time_ms: s.prove_time_ms,
+                sub_metrics: s.sub_metrics.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let mut internal_proofs: Vec<TaskTiming> = self
+            .internal_proofs
+            .values()
+            .map(|s| TaskTiming {
+                worker_id: s.worker_id,
+                completed_at_ms: s.completed_at_ms,
+                segment_start: s.segment_start,
+                segment_end: s.segment_end,
+                layer_idx: Some(s.layer_idx),
+                prove_time_ms: s.prove_time_ms,
+                compression_time_ms: s.compression_time_ms,
+                sub_metrics: s.sub_metrics.clone(),
+                wrap_sub_metrics: s.wrap_sub_metrics.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        for tasks in [&mut app_proofs, &mut leaf_proofs, &mut internal_proofs] {
+            tasks.sort_by_key(|t| (t.segment_start, t.layer_idx));
+        }
+
+        ProofPipeline {
+            proof_start_time: self.proof_start_time,
+            app_proofs,
+            leaf_proofs,
+            internal_proofs,
+        }
+    }
+
     /// Check if the proof should be evicted based on age.
     pub fn should_evict(&self, now: DateTime<Utc>) -> bool {
         let age = now - self.last_updated;
@@ -602,10 +666,41 @@ pub struct LightweightProofState {
     pub persisted_leaf_failure_app_proofs_path: Option<String>,
 }
 
+/// Task timeline of one proof, for API responses.
+#[derive(Debug, Serialize, Clone)]
+pub struct ProofPipeline {
+    pub proof_start_time: DateTime<Utc>,
+    pub app_proofs: Vec<TaskTiming>,
+    pub leaf_proofs: Vec<TaskTiming>,
+    pub internal_proofs: Vec<TaskTiming>,
+}
+
+/// One task of the timeline, stamped by the manager on receipt.
+#[derive(Debug, Default, Serialize, Clone)]
+pub struct TaskTiming {
+    pub worker_id: usize,
+    pub completed_at_ms: u64,
+    pub segment_start: usize,
+    pub segment_end: usize,
+    /// Internal tasks only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer_idx: Option<usize>,
+    pub queue_wait_ms: u64,
+    pub metered_time_ms: u64,
+    pub prove_time_ms: u64,
+    pub fastfwd_time_ms: u64,
+    pub stark_prove_time_ms: u64,
+    pub compression_time_ms: u64,
+    pub sub_metrics: HashMap<String, f64>,
+    pub wrap_sub_metrics: HashMap<String, f64>,
+}
+
 #[cfg(all(test, feature = "mock-provers"))]
 mod tests {
     use super::*;
-    use protocol::ProofContext;
+    use protocol::{
+        current_timestamp, AppProof, LeafProof, MessageEnvelope, ProofContext, ProofResult,
+    };
 
     fn make_context() -> ProofContext {
         ProofContext::new(
@@ -613,6 +708,14 @@ mod tests {
             protocol::ProgramRef::new("test-program", 1),
             Default::default(),
         )
+    }
+
+    fn make_mock_proof() -> Vec<u8> {
+        proof::encode_proof(&ProofWithPublicValue::<F> {
+            proof: vec![0u8; 256],
+            public_values: vec![F::default(); 4],
+        })
+        .expect("mock proof encodes")
     }
 
     #[test]
@@ -695,5 +798,117 @@ mod tests {
         // Should not change status from Completed → Failed.
         assert!(matches!(state.status, ProofStatus::Completed));
         assert!(state.last_error_result.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_reports_worker_and_segments_per_task() {
+        let context = make_context();
+        let mut state = ProofState::new(context.clone(), 1_000_000, 4, 4, 3, 300);
+        state.num_segments = Some(4);
+
+        let app_result = |worker_id, segment_idx| {
+            let mut result = ProofResult::App(AppProof {
+                context: context.clone(),
+                state: AppProofState {
+                    proof: Some(make_mock_proof()),
+                    segment_idx,
+                    prove_time_ms: 0,
+                    fastfwd_time_ms: 0,
+                    stark_prove_time_ms: 0,
+                    queue_wait_ms: 12,
+                    metered_time_ms: 34,
+                    sub_metrics: HashMap::new(),
+                    final_merkle_path_bytes: None,
+                    deferral_merkle_proofs_bytes: None,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                },
+            });
+            result.stamp(worker_id, current_timestamp());
+            result
+        };
+        state
+            .handle_proof_result_with_envelope(MessageEnvelope::with_metadata(app_result(3, 2)))
+            .unwrap();
+        state
+            .handle_proof_result_with_envelope(MessageEnvelope::with_metadata(app_result(5, 0)))
+            .unwrap();
+
+        let mut leaf_result = ProofResult::Leaf(LeafProof {
+            context: context.clone(),
+            state: LeafProofState {
+                proof: Some(make_mock_proof()),
+                segment_start: 0,
+                segment_end: 3,
+                prove_time_ms: 0,
+                sub_metrics: HashMap::new(),
+                worker_id: 0,
+                completed_at_ms: 0,
+            },
+        });
+        leaf_result.stamp(7, current_timestamp());
+        state
+            .handle_proof_result_with_envelope(MessageEnvelope::with_metadata(leaf_result))
+            .unwrap();
+
+        state.internal_proofs.insert(
+            InternalProofIndex {
+                layer_idx: 1,
+                idx: 0,
+            },
+            InternalProofState {
+                proof: None,
+                layer_idx: 1,
+                segment_start: 0,
+                segment_end: 3,
+                prove_time_ms: 400,
+                compression_time_ms: 250,
+                sub_metrics: HashMap::new(),
+                wrap_sub_metrics: HashMap::from([("trace_gen_time_ms".to_string(), 60.0)]),
+                deferral_merkle_proofs_bytes: None,
+                ready_for_evm: false,
+                worker_id: 9,
+                completed_at_ms: 77,
+            },
+        );
+
+        let pipeline = state.to_pipeline();
+
+        let app_segments: Vec<usize> = pipeline
+            .app_proofs
+            .iter()
+            .map(|t| t.segment_start)
+            .collect();
+        assert_eq!(app_segments, vec![0, 2]);
+        assert_eq!(
+            (
+                pipeline.app_proofs[0].worker_id,
+                pipeline.app_proofs[1].worker_id
+            ),
+            (5, 3)
+        );
+        assert!(pipeline.app_proofs.iter().all(|t| t.completed_at_ms > 0));
+        assert_eq!(
+            (
+                pipeline.app_proofs[0].queue_wait_ms,
+                pipeline.app_proofs[0].metered_time_ms
+            ),
+            (12, 34)
+        );
+
+        let leaf = &pipeline.leaf_proofs[0];
+        assert_eq!(
+            (leaf.worker_id, leaf.segment_start, leaf.segment_end),
+            (7, 0, 3)
+        );
+        assert!(leaf.completed_at_ms > 0);
+
+        let internal = &pipeline.internal_proofs[0];
+        assert_eq!(internal.layer_idx, Some(1));
+        assert_eq!((internal.worker_id, internal.compression_time_ms), (9, 250));
+        assert_eq!(
+            internal.wrap_sub_metrics.get("trace_gen_time_ms"),
+            Some(&60.0)
+        );
     }
 }

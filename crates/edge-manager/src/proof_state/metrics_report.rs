@@ -405,6 +405,17 @@ impl ProofState {
                 )
                 .set(val);
             }
+            for (key, &val) in &internal_state.wrap_sub_metrics {
+                let sanitized = sanitize_metric_key(key);
+                metrics::gauge!(format!("edge_internal_wrap_{sanitized}"),
+                    "program_name" => program_name.clone(),
+                "program_version" => program_version.clone(),
+                    "proof_uuid" => proof.clone(),
+                    "layer_idx" => idx.layer_idx.to_string(),
+                    "node_idx" => idx.idx.to_string()
+                )
+                .set(val);
+            }
             total_internal_ms += internal_state.prove_time_ms;
             total_compression_ms += internal_state.compression_time_ms;
         }

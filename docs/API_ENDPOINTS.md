@@ -251,6 +251,54 @@ Get the current state of a proof.
 
 ---
 
+### GET `/proof_pipeline/{proof_uuid}`
+
+Get the task timeline of a proof. Each task carries the worker that produced it
+and the manager clock at receipt, so a caller reconstructs the schedule without
+worker logs. `worker_id` indexes the `/workers` listing. An internal task also
+carries `layer_idx`. Every task carries `wrap_sub_metrics`, which holds the span
+durations of the final proof wrap that `compression_time_ms` measures and is
+filled only on the wrapped final internal task. An app task carries the queue
+wait and the metered execution time that precede it, and that interval covers
+every segment the worker executed since its previous send. `proof_start_time` is
+the instant the manager admitted the `/start_proof` request. The view holds no
+proof bytes and no EVM proof, and it is kept for five minutes after the proof
+settles.
+
+**Path Parameters:**
+- `proof_uuid`: The proof identifier
+
+**Response:**
+
+- **200 OK**: Task timeline
+```json
+{
+  "proof_start_time": "2024-01-01T00:00:00Z",
+  "app_proofs": [
+    {
+      "worker_id": 3,
+      "completed_at_ms": 1704067203500,
+      "segment_start": 2,
+      "segment_end": 2,
+      "queue_wait_ms": 40,
+      "metered_time_ms": 260,
+      "prove_time_ms": 1200,
+      "fastfwd_time_ms": 150,
+      "stark_prove_time_ms": 1000,
+      "compression_time_ms": 0,
+      "sub_metrics": { "trace_gen_time_ms": 320.0 },
+      "wrap_sub_metrics": {}
+    }
+  ],
+  "leaf_proofs": [],
+  "internal_proofs": []
+}
+```
+
+- **404 Not Found**: Proof not found
+
+---
+
 ### GET `/proof_debug/{proof_uuid}`
 
 Get scheduler-side per-worker debug state for an in-progress proof.

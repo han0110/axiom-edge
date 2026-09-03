@@ -224,9 +224,13 @@ fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> 
                 prove_time_ms,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: prove_time_ms,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: std::collections::HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
             },
         });
 
@@ -737,6 +741,9 @@ mod real_impl {
         /// gap to the moment a prover picks it up separates a prover-bound run
         /// from an executor-bound one.
         sent_at: Instant,
+        /// Executor time between the end of the previous send of this worker
+        /// and this send.
+        metered_time_ms: u64,
     }
 
     /// Result returned by the executor thread after execution completes.
@@ -1018,6 +1025,7 @@ mod real_impl {
 
             let mut driver = MeteredDriver::new(metered_interpreter, vm_state, metered_ctx);
             let exec_start = std::time::Instant::now();
+            let mut last_sent = exec_start;
 
             info!("Executor thread: starting metered execution");
 
@@ -1039,15 +1047,18 @@ mod real_impl {
                     let segment = driver.segments()[curr_idx].clone();
 
                     info!("Executor: sending segment {} for proving", curr_idx);
+                    let sent_at = Instant::now();
                     prove_tx
                         .send(ProveData {
                             snapshot,
                             segment,
                             segment_idx: curr_idx,
                             is_final: should_break,
-                            sent_at: Instant::now(),
+                            sent_at,
+                            metered_time_ms: (sent_at - last_sent).as_millis() as u64,
                         })
                         .map_err(|_| eyre::eyre!("Prover disconnected"))?;
+                    last_sent = Instant::now();
                 }
 
                 if should_break {
@@ -1231,9 +1242,13 @@ mod real_impl {
                     prove_time_ms,
                     fastfwd_time_ms,
                     stark_prove_time_ms,
+                    queue_wait_ms,
+                    metered_time_ms: prove_data.metered_time_ms,
                     sub_metrics,
                     final_merkle_path_bytes,
                     deferral_merkle_proofs_bytes,
+                    worker_id: 0,
+                    completed_at_ms: 0,
                 },
             });
 
@@ -1468,9 +1483,13 @@ mod real_impl {
                     prove_time_ms,
                     fastfwd_time_ms,
                     stark_prove_time_ms,
+                    queue_wait_ms,
+                    metered_time_ms: prove_data.metered_time_ms,
                     sub_metrics,
                     final_merkle_path_bytes,
                     deferral_merkle_proofs_bytes,
+                    worker_id: 0,
+                    completed_at_ms: 0,
                 },
             });
             if let Some(ref tx) = streaming_tx {
@@ -1643,6 +1662,7 @@ mod real_impl {
 
             let mut driver = MeteredDriver::new(metered_interpreter, vm_state, metered_ctx);
             let exec_start = std::time::Instant::now();
+            let mut last_sent = exec_start;
 
             info!(
                 "VM setup: input_read={}ms, stdin={}ms, metered_ctx={}ms, vm_state={}ms, seed_state={}ms, total={}ms",
@@ -1675,15 +1695,18 @@ mod real_impl {
                         "Executor (parallel): sending segment {} for proving",
                         curr_idx
                     );
+                    let sent_at = Instant::now();
                     prove_tx
                         .send(ProveData {
                             snapshot,
                             segment,
                             segment_idx: curr_idx,
                             is_final: should_break,
-                            sent_at: Instant::now(),
+                            sent_at,
+                            metered_time_ms: (sent_at - last_sent).as_millis() as u64,
                         })
                         .map_err(|_| eyre::eyre!("All prover consumers disconnected"))?;
+                    last_sent = Instant::now();
                 }
 
                 if should_break {
@@ -1864,9 +1887,13 @@ mod real_impl {
                     prove_time_ms,
                     fastfwd_time_ms,
                     stark_prove_time_ms,
+                    queue_wait_ms,
+                    metered_time_ms: prove_data.metered_time_ms,
                     sub_metrics,
                     final_merkle_path_bytes,
                     deferral_merkle_proofs_bytes,
+                    worker_id: 0,
+                    completed_at_ms: 0,
                 },
             });
 

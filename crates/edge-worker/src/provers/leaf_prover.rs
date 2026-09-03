@@ -78,6 +78,8 @@ fn prove_leaf_impl(job: LeafProverJob) -> Result<Vec<ProofResult>> {
             segment_end: job.segment_end,
             prove_time_ms,
             sub_metrics: std::collections::HashMap::new(),
+            worker_id: 0,
+            completed_at_ms: 0,
         },
     };
 
@@ -256,6 +258,8 @@ mod real_impl {
                 segment_end: job.segment_end,
                 prove_time_ms,
                 sub_metrics,
+                worker_id: 0,
+                completed_at_ms: 0,
             },
         };
 
