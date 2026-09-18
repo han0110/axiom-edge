@@ -40,7 +40,9 @@ use {
 pub const EDGE_OPENVM_CONFIG_ENV: &str = "EDGE_OPENVM_CONFIG";
 
 const VM_MAX_CONSTRAINT_DEGREE: usize = 3;
-const VM_NUM_PUBLIC_VALUES: usize = 32;
+/// Counts u16 cells, so 128 cells carry the 256 public-value bytes the ere
+/// verifier expects.
+const VM_NUM_PUBLIC_VALUES: usize = 128;
 
 /// Build the edge's `SdkVmConfig`.
 ///
