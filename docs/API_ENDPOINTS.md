@@ -251,6 +251,50 @@ Get the current state of a proof.
 
 ---
 
+### GET `/proof_pipeline/{proof_uuid}`
+
+Get the per-task timeline of a proof. Each task carries `worker_id`, which
+indexes the `/workers` listing, and `completed_at_ms`, the manager clock at
+receipt. An internal task also carries `layer_idx`. Every task carries
+`wrap_sub_metrics`, which only the wrapped final internal task fills. An app
+task carries `queue_wait_ms`, the wait in the executor-to-prover channel, and
+`metered_time_ms`, the executor time since its previous send. The view holds no
+proof bytes.
+
+**Path Parameters:**
+- `proof_uuid`: The proof identifier
+
+**Response:**
+
+- **200 OK**: Per-task timeline
+```json
+{
+  "proof_start_time": "2024-01-01T00:00:00Z",
+  "app_proofs": [
+    {
+      "worker_id": 3,
+      "completed_at_ms": 1704067203500,
+      "segment_start": 2,
+      "segment_end": 2,
+      "queue_wait_ms": 40,
+      "metered_time_ms": 260,
+      "prove_time_ms": 1200,
+      "fastfwd_time_ms": 150,
+      "stark_prove_time_ms": 1000,
+      "compression_time_ms": 0,
+      "sub_metrics": { "trace_gen_time_ms": 320.0 },
+      "wrap_sub_metrics": {}
+    }
+  ],
+  "leaf_proofs": [],
+  "internal_proofs": []
+}
+```
+
+- **404 Not Found**: Proof not found
+
+---
+
 ### GET `/proof_events/{proof_uuid}`
 
 Stream the status of a proof as server-sent events. The stream sends the current

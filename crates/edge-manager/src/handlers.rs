@@ -24,9 +24,9 @@ use crate::proof_state::{ProofResultEnvelopeOutcome, ProofState, ProofStatus};
 use crate::scheduler::{AssignedWork, EdgeStateStore};
 use crate::worker_registry::{app_eligible_workers, EdgeWorkerRegistry, RegisteredWorker};
 use protocol::{
-    GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef, ProofContext, ProofResult,
-    RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest, StartProofRequest, Step,
-    WithProofContext,
+    current_timestamp, GeneralProveRequest, LoadoutResponse, MessageEnvelope, ProgramRef,
+    ProofContext, ProofResult, RegisterWorkerRequest, ResultPayload, ShardedAppProveRequest,
+    StartProofRequest, Step, WithProofContext,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -1025,7 +1025,7 @@ pub async fn start_proof(
 /// Receive proof result from a worker.
 pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
     // Deserialize bincode payload
-    let payload: ResultPayload = match bincode::deserialize(&body) {
+    let mut payload: ResultPayload = match bincode::deserialize(&body) {
         Ok(p) => p,
         Err(e) => {
             error!("Failed to deserialize ResultPayload: {}", e);
@@ -1035,6 +1035,10 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
             );
         }
     };
+    payload
+        .result
+        .message
+        .stamp(payload.worker_id, current_timestamp());
 
     let proof_uuid = payload.proof_uuid.clone();
     let worker_id = payload.worker_id;
@@ -1237,6 +1241,24 @@ pub async fn proof_state(
             let guard = proof_state.lock().await;
             let lightweight = guard.to_lightweight_state();
             (StatusCode::OK, Json(serde_json::json!(lightweight)))
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Proof not found"})),
+        ),
+    }
+}
+
+/// Get the per-task timeline of a proof.
+pub async fn proof_pipeline(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> impl IntoResponse {
+    let proof_state = state.proof_states.get(&proof_uuid).map(|s| s.clone());
+    match proof_state {
+        Some(proof_state) => {
+            let pipeline = proof_state.lock().await.to_pipeline();
+            (StatusCode::OK, Json(serde_json::json!(pipeline)))
         }
         None => (
             StatusCode::NOT_FOUND,

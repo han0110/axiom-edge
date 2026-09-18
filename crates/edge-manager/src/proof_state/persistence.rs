@@ -293,9 +293,13 @@ mod tests {
                     prove_time_ms: 10,
                     fastfwd_time_ms: 3,
                     stark_prove_time_ms: 7,
+                    queue_wait_ms: 0,
+                    metered_time_ms: 0,
                     sub_metrics: HashMap::new(),
                     final_merkle_path_bytes: None,
                     deferral_merkle_proofs_bytes: None,
+                    worker_id: 0,
+                    completed_at_ms: 0,
                 },
             );
         }

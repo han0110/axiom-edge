@@ -19,4 +19,6 @@ mod state;
 
 pub use persistence::{CompletedLeafBatch, PersistedLeafFailureAppProofs};
 pub use result_handler::ProofResultEnvelopeOutcome;
-pub use state::{InternalProofIndex, LightweightProofState, ProofState, ProofStatus};
+pub use state::{
+    InternalProofIndex, LightweightProofState, ProofPipeline, ProofState, ProofStatus, TaskTiming,
+};
