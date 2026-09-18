@@ -37,6 +37,10 @@ impl ResultClient {
     /// Submit a single proof result to the manager.
     pub async fn submit_single_result(&self, proof_uuid: &str, result: ProofResult) -> Result<()> {
         let url = format!("{}/proof_result", self.manager_url);
+        let mut result = result;
+        if let Some(stamps) = result.stamps_mut() {
+            stamps.worker_end_ms = protocol::current_timestamp();
+        }
 
         let payload = ResultPayload {
             worker_id: self.worker_id,

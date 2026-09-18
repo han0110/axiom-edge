@@ -1243,9 +1243,14 @@ mod tests {
                     prove_time_ms: 0,
                     fastfwd_time_ms: 0,
                     stark_prove_time_ms: 0,
+                    queue_wait_ms: 0,
+                    metered_time_ms: 0,
                     sub_metrics: HashMap::new(),
                     final_merkle_path_bytes: None,
                     deferral_merkle_proofs_bytes: None,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             };
 
@@ -1295,6 +1300,9 @@ mod tests {
                     segment_end,
                     prove_time_ms: 0,
                     sub_metrics: HashMap::new(),
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             };
 
@@ -1340,6 +1348,9 @@ mod tests {
                 segment_end: 3,
                 prove_time_ms: 0,
                 sub_metrics: HashMap::new(),
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
         state.leaf_proofs.insert(0, leaf_proof.state.clone());
@@ -1355,8 +1366,12 @@ mod tests {
                 prove_time_ms: 0,
                 compression_time_ms: 0,
                 sub_metrics: HashMap::new(),
+                wrap_sub_metrics: HashMap::new(),
                 deferral_merkle_proofs_bytes: None,
                 ready_for_evm: false,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
         state.internal_proofs.insert(
@@ -1380,8 +1395,12 @@ mod tests {
                 prove_time_ms: 0,
                 compression_time_ms: 0,
                 sub_metrics: HashMap::new(),
+                wrap_sub_metrics: HashMap::new(),
                 deferral_merkle_proofs_bytes: None,
                 ready_for_evm: false,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
         state.internal_proofs.insert(
@@ -1505,9 +1524,14 @@ mod tests {
                 prove_time_ms: 0,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: 0,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
 
@@ -1540,9 +1564,14 @@ mod tests {
                 prove_time_ms: 0,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: 0,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
 
@@ -1595,9 +1624,14 @@ mod tests {
                 prove_time_ms: 0,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: 0,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
 
@@ -1624,9 +1658,14 @@ mod tests {
                 prove_time_ms: 0,
                 fastfwd_time_ms: 0,
                 stark_prove_time_ms: 0,
+                queue_wait_ms: 0,
+                metered_time_ms: 0,
                 sub_metrics: HashMap::new(),
                 final_merkle_path_bytes: None,
                 deferral_merkle_proofs_bytes: None,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         };
 
@@ -1687,8 +1726,12 @@ mod tests {
                 prove_time_ms: 0,
                 compression_time_ms: 0,
                 sub_metrics: HashMap::new(),
+                wrap_sub_metrics: HashMap::new(),
                 deferral_merkle_proofs_bytes: None,
                 ready_for_evm: false,
+                worker_id: 0,
+                completed_at_ms: 0,
+                stamps: Default::default(),
             },
         );
         state
@@ -1752,8 +1795,12 @@ mod tests {
                     prove_time_ms: 0,
                     compression_time_ms: 0,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: false,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();
@@ -1769,8 +1816,12 @@ mod tests {
                     prove_time_ms: 0,
                     compression_time_ms: 0,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: false,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();
@@ -1838,8 +1889,12 @@ mod tests {
                     prove_time_ms: 5,
                     compression_time_ms: 0,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: false,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();
@@ -1859,8 +1914,12 @@ mod tests {
                     prove_time_ms: 7,
                     compression_time_ms: 1,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: true,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();
@@ -1922,8 +1981,12 @@ mod tests {
                     prove_time_ms: 7,
                     compression_time_ms: 1,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: true,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();
@@ -1973,8 +2036,12 @@ mod tests {
                     prove_time_ms: 7,
                     compression_time_ms: 1,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: None,
                     ready_for_evm: false,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap_err();
@@ -2011,8 +2078,12 @@ mod tests {
                     prove_time_ms: 7,
                     compression_time_ms: 1,
                     sub_metrics: HashMap::new(),
+                    wrap_sub_metrics: HashMap::new(),
                     deferral_merkle_proofs_bytes: Some(merkle.clone()),
                     ready_for_evm: true,
+                    worker_id: 0,
+                    completed_at_ms: 0,
+                    stamps: Default::default(),
                 },
             }))
             .unwrap();

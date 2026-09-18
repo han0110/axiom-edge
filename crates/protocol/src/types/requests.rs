@@ -273,6 +273,9 @@ pub struct ShardedAppProveRequest {
     /// Optional override for OPENVM_MAX_SEGMENT_MEMORY.
     #[serde(default)]
     pub segment_memory: Option<usize>,
+    /// Manager clock at dispatch, in milliseconds since the epoch.
+    #[serde(default)]
+    pub dispatched_at_ms: u64,
 }
 
 /// Leaf prove request — aggregate a batch of app proofs into a leaf proof.

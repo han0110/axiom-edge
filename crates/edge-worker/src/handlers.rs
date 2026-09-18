@@ -761,6 +761,7 @@ pub async fn handle_sharded_app_prove(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ShardedAppProveRequest>,
 ) -> impl IntoResponse {
+    let worker_start_ms = protocol::current_timestamp();
     let proof_uuid = req.proof_uuid.clone();
 
     if let Err(reason) = validate_uploaded_proof_uuid(&proof_uuid) {
@@ -891,8 +892,14 @@ pub async fn handle_sharded_app_prove(
             let rt = tokio::runtime::Handle::current();
             info!("Sender task started for proof {}", sender_uuid);
             let mut count = 0u32;
-            for proof_result in result_rx.iter() {
+            for mut proof_result in result_rx.iter() {
                 count += 1;
+                if let protocol::ProofResult::App(app) = &mut proof_result {
+                    if app.state.segment_idx == req.prover_id {
+                        app.state.stamps.dispatched_at_ms = req.dispatched_at_ms;
+                        app.state.stamps.worker_start_ms = worker_start_ms;
+                    }
+                }
                 info!(
                     "Streaming result {count} for proof {} (worker_id={})",
                     sender_uuid,
@@ -966,6 +973,7 @@ pub async fn handle_recursion_prove(
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> impl IntoResponse {
+    let worker_start_ms = protocol::current_timestamp();
     // Deserialize bincode payload
     let envelope: MessageEnvelope<GeneralProveRequest> = match bincode::deserialize(&body) {
         Ok(e) => e,
@@ -985,6 +993,7 @@ pub async fn handle_recursion_prove(
     };
 
     info!("Received edge_prove_work for proof {}", proof_uuid);
+    let dispatched_at_ms = envelope.timestamp;
 
     match envelope.message {
         GeneralProveRequest::LeafProve(req) => {
@@ -1034,7 +1043,8 @@ pub async fn handle_recursion_prove(
                 };
 
                 match state_clone.prover_pool.submit_leaf_job(job).await {
-                    Ok(ProverResult::Success(results)) => {
+                    Ok(ProverResult::Success(mut results)) => {
+                        stamp_worker_start(&mut results, dispatched_at_ms, worker_start_ms);
                         if let Err(e) = state_clone
                             .result_client
                             .submit_result(&proof_uuid_clone, results)
@@ -1139,7 +1149,8 @@ pub async fn handle_recursion_prove(
                 };
 
                 match state_clone.prover_pool.submit_internal_job(job).await {
-                    Ok(ProverResult::Success(results)) => {
+                    Ok(ProverResult::Success(mut results)) => {
+                        stamp_worker_start(&mut results, dispatched_at_ms, worker_start_ms);
                         // A `proof_type=stark` deferral job's completion
                         // artifact is the MERGED final internal proof
                         // (`prove_def → prove_mixed → wrap`) carrying its
@@ -1261,6 +1272,20 @@ pub async fn handle_recursion_prove(
     }
 
     (StatusCode::OK, "Work completed".to_string())
+}
+
+fn stamp_worker_start(
+    results: &mut [protocol::ProofResult],
+    dispatched_at_ms: u64,
+    worker_start_ms: u64,
+) {
+    for stamps in results
+        .iter_mut()
+        .filter_map(protocol::ProofResult::stamps_mut)
+    {
+        stamps.dispatched_at_ms = dispatched_at_ms;
+        stamps.worker_start_ms = worker_start_ms;
+    }
 }
 
 /// Run the EVM step (root → halo2) on a FINISHED (post-tail-merge) internal
