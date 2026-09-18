@@ -425,10 +425,7 @@ mod real_impl {
     /// `StdIn` (today's path — `buffer` only) and grafts `deferrals` onto it
     /// from the per-circuit staged files. Non-deferral jobs round-trip
     /// byte-identically.
-    fn build_execution_stdin(
-        input_bytes: &[u8],
-        deferral_state_paths: &[String],
-    ) -> Result<StdIn> {
+    fn build_execution_stdin(input_bytes: &[u8], deferral_state_paths: &[String]) -> Result<StdIn> {
         let mut stdin: StdIn = bincode::deserialize(input_bytes)
             .map_err(|e| eyre::eyre!("Failed to deserialize input: {}", e))?;
         let deferrals = load_and_validate_deferral_states(deferral_state_paths)?;
@@ -453,24 +450,21 @@ mod real_impl {
         openvm_stark_backend::Val<sdk_v2::SC>,
     >;
 
-    /// Fixed-program prover: the GPU `VmInstance` plus a `SegmentProver`
-    /// prepared once at construction. Under cuda+rvr `SegmentProver` resolves to
+    /// Fixed-program prover: a `SegmentProver` prepared once at construction,
+    /// owning the GPU `VmInstance` it proves with. Under cuda+rvr
+    /// `SegmentProver` resolves to
     /// `openvm_sdk_config::preflight_driver::SegmentProver`, which uploads the
     /// guest program to the device once and runs the native rvr preflight per
     /// segment (no per-segment upload, no interpreter). Held in
     /// `Option<ProverType>` on each app worker thread, swapped on program change.
     pub struct ProverType {
         segment_prover: SegmentProver,
-        instance: VmInstance<RecursionEngine, SdkVmBuilder>,
     }
 
     impl ProverType {
         fn new(instance: VmInstance<RecursionEngine, SdkVmBuilder>) -> Result<Self> {
-            let segment_prover = SegmentProver::new(&instance)?;
-            Ok(Self {
-                segment_prover,
-                instance,
-            })
+            let segment_prover = SegmentProver::new(instance)?;
+            Ok(Self { segment_prover })
         }
 
         /// Prove one segment from its (fast-forwarded) start state via the
@@ -487,8 +481,7 @@ mod real_impl {
             ),
             sdk_v2::openvm_circuit::arch::VirtualMachineError,
         > {
-            self.segment_prover
-                .prove(&mut self.instance, state, segment)
+            self.segment_prover.prove(state, segment)
         }
     }
 
@@ -506,7 +499,8 @@ mod real_impl {
     // state and makes its trace fail the LogUp argument. So we keep the exact
     // interpreter for fast-forward (a cheap ~1-segment replay) and use the
     // native rvr backend only for the expensive metered segment discovery.
-    type PureInstanceType = sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, ExecutionCtx>;
+    type PureInstanceType =
+        sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, ExecutionCtx>;
 
     // Metered (segment discovery) instance: interpreter by default; the native
     // rvr segment-boundary instance under `rvr` (the successor to the removed
@@ -516,7 +510,8 @@ mod real_impl {
     type MeteredInstanceType =
         sdk_v2::openvm_circuit::arch::InterpretedInstance<'static, MeteredCtx>;
     #[cfg(feature = "rvr")]
-    type MeteredInstanceType = sdk_v2::openvm_circuit::arch::rvr::RvrMeteredSegmentInstance<'static>;
+    type MeteredInstanceType =
+        sdk_v2::openvm_circuit::arch::rvr::RvrMeteredSegmentInstance<'static>;
 
     /// Fast-forward `vm_state` by exactly `num_ins` instructions on the pure
     /// (interpreter) instance, returning the resulting VM state. Instruction-
@@ -598,7 +593,10 @@ mod real_impl {
             }
             #[cfg(feature = "rvr")]
             {
-                let vm_state = self.vm_state.take().expect("vm_state present between steps");
+                let vm_state = self
+                    .vm_state
+                    .take()
+                    .expect("vm_state present between steps");
                 let ctx = self.ctx.take().expect("ctx present between steps");
                 // A non-zero guest exit surfaces here as an `Err` (rvr
                 // `GuestExit`), matching the interpreter's explicit non-zero
@@ -699,8 +697,8 @@ mod real_impl {
         segment_memory: Option<usize>,
     ) -> MeteredCtx {
         let mut metered_ctx = app_prover
-            .instance
-            .vm
+            .segment_prover
+            .vm()
             .build_metered_ctx(exe)
             .with_suspend_on_segment(true);
 
@@ -1155,16 +1153,18 @@ mod real_impl {
                         break;
                     }
                 };
-                let top_tree =
-                    match app_prover.instance.vm.memory_top_tree().ok_or_else(|| {
-                        eyre::eyre!("Memory top tree should exist for terminal segment")
-                    }) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            prover_err = Some(e);
-                            break;
-                        }
-                    };
+                let top_tree = match app_prover
+                    .segment_prover
+                    .vm()
+                    .memory_top_tree()
+                    .ok_or_else(|| eyre::eyre!("Memory top tree should exist for terminal segment"))
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        prover_err = Some(e);
+                        break;
+                    }
+                };
                 let memory_dimensions = vm_config.system.config.memory_config.memory_dimensions();
                 let hasher = vm_poseidon2_hasher();
                 user_public_values = Some(UserPublicValuesProof::compute(
@@ -1362,7 +1362,7 @@ mod real_impl {
                         ));
                     }
                 };
-                let top_tree = match app_prover.instance.vm.memory_top_tree() {
+                let top_tree = match app_prover.segment_prover.vm().memory_top_tree() {
                     Some(t) => t,
                     None => {
                         return consumer_failure(format!(
@@ -1724,16 +1724,18 @@ mod real_impl {
                         break;
                     }
                 };
-                let top_tree =
-                    match app_prover.instance.vm.memory_top_tree().ok_or_else(|| {
-                        eyre::eyre!("Memory top tree should exist for terminal segment")
-                    }) {
-                        Ok(t) => t,
-                        Err(e) => {
-                            prover_err = Some(e);
-                            break;
-                        }
-                    };
+                let top_tree = match app_prover
+                    .segment_prover
+                    .vm()
+                    .memory_top_tree()
+                    .ok_or_else(|| eyre::eyre!("Memory top tree should exist for terminal segment"))
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        prover_err = Some(e);
+                        break;
+                    }
+                };
                 let memory_dimensions = vm_config.system.config.memory_config.memory_dimensions();
                 let hasher = vm_poseidon2_hasher();
                 user_public_values = Some(UserPublicValuesProof::compute(
