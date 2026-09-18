@@ -4,11 +4,17 @@ use axum::{
     body::Bytes,
     extract::{Multipart, Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use dashmap::DashMap;
+use futures::Stream;
+use std::io::ErrorKind;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
@@ -1065,7 +1071,7 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
     // Process result and classify whether it was fresh, duplicate, or late.
     let outcome = {
         let mut guard = proof_state.lock().await;
-        match guard.handle_proof_result_with_envelope_outcome(payload.result) {
+        let outcome = match guard.handle_proof_result_with_envelope_outcome(payload.result) {
             Ok(outcome) => outcome,
             Err(e) => {
                 error!("Failed to handle proof result: {}", e);
@@ -1074,7 +1080,22 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
                     Json(serde_json::json!({"error": e.to_string()})),
                 );
             }
+        };
+        // Persisting under the same lock guarantees that a `completed` status
+        // seen through `/proof_state` or `/proof_events` has its `/proof` file.
+        if matches!(guard.status, ProofStatus::Completed) {
+            if let Some(dir) = state.config.proof.persist_final_proofs_dir.as_ref() {
+                if let Err(e) = guard.persist_final_proof_to_disk(
+                    dir,
+                    state.config.proof.compress_persisted_final_proofs,
+                ) {
+                    error!("Failed to persist final proof {}: {}", proof_uuid, e);
+                    guard.status = ProofStatus::Failed(format!("persist final proof: {e}"));
+                    guard.notify_completion();
+                }
+            }
         }
+        outcome
     };
 
     let (follow_up_requests, transitioned_to_terminal) = match outcome {
@@ -1221,6 +1242,155 @@ pub async fn proof_state(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Proof not found"})),
         ),
+    }
+}
+
+/// Serve a program's verification baseline from the artifacts export.
+pub async fn download_vk(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    let versions: Vec<u32> = state
+        .programs
+        .iter()
+        .filter(|program| program.name == name)
+        .map(|program| program.version)
+        .collect();
+    let version = match versions[..] {
+        [version] => version,
+        [] => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("program '{name}' is not in the loadout")
+                })),
+            )
+                .into_response()
+        }
+        _ => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("program '{name}' has {} loadout versions", versions.len())
+                })),
+            )
+                .into_response()
+        }
+    };
+    let path = state
+        .config
+        .server
+        .artifacts_path
+        .join(format!("programs/{name}/{version}/baseline.bin"));
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes.into_response(),
+        Err(e) if e.kind() == ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("no baseline for program '{name}'")})),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("failed to read {}: {e}", path.display());
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to read baseline"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Serve the persisted final STARK proof, decompressed when the deployment
+/// compresses it. Disk is the source of truth, so evicted proofs stay available.
+pub async fn download_proof(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> Response {
+    if let Err(reason) = validate_manager_proof_uuid(&proof_uuid) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Invalid proof_uuid: {reason}")})),
+        )
+            .into_response();
+    }
+    let Some(dir) = &state.config.proof.persist_final_proofs_dir else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "proof persistence is disabled"})),
+        )
+            .into_response();
+    };
+    let path = dir.join(format!("{proof_uuid}.proof.bin"));
+    let compressed = state.config.proof.compress_persisted_final_proofs;
+    // Multi-MB reads and zstd decoding stay off the async executor.
+    let read = tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(path)?;
+        if compressed {
+            zstd::decode_all(&bytes[..])
+        } else {
+            Ok(bytes)
+        }
+    })
+    .await
+    .expect("proof read task panicked");
+    match read {
+        Ok(bytes) => bytes.into_response(),
+        Err(e) if e.kind() == ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "proof not found"})),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("failed to read persisted proof {proof_uuid}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to read proof"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Backstop for status writes that skip `notify_completion`.
+const PROOF_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Stream the proof status as server-sent events until it settles.
+pub async fn proof_events(
+    State(state): State<Arc<AppState>>,
+    Path(proof_uuid): Path<String>,
+) -> Response {
+    let Some(proof) = state.proof_states.get(&proof_uuid).map(|s| s.clone()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Proof not found"})),
+        )
+            .into_response();
+    };
+    Sse::new(status_events(proof))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Emit the current status on subscribe and again on every change.
+fn status_events(proof: Arc<Mutex<ProofState>>) -> impl Stream<Item = Result<Event, axum::Error>> {
+    async_stream::try_stream! {
+        let notifier = proof.lock().await.completion_notifier();
+        let mut last = None;
+        loop {
+            // Registered before the status read so a completion in between still wakes it.
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let current = proof.lock().await.status.clone();
+            if last.as_ref() != Some(&current) {
+                yield Event::default().event("status").json_data(&current)?;
+                if current.is_settled() {
+                    break;
+                }
+                last = Some(current);
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(PROOF_EVENT_POLL_INTERVAL) => {}
+            }
+        }
     }
 }
 
@@ -1961,4 +2131,58 @@ async fn abort_proof_with_failure(
             "proof_uuid": proof_uuid,
         })),
     )
+}
+
+#[cfg(test)]
+mod status_event_tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::time::Instant;
+
+    fn in_progress_proof() -> Arc<Mutex<ProofState>> {
+        let context = ProofContext::new(
+            "p-events".to_string(),
+            ProgramRef::new("test-program", 1),
+            Default::default(),
+        );
+        Arc::new(Mutex::new(ProofState::new(
+            context, 1_000_000, 1, 4, 3, 300,
+        )))
+    }
+
+    /// The notifier delivers a settle well inside one poll interval.
+    #[tokio::test]
+    async fn settling_wakes_the_stream_before_the_poll_interval() {
+        let proof = in_progress_proof();
+        let stream = status_events(proof.clone());
+        futures::pin_mut!(stream);
+        assert!(stream.next().await.expect("initial status").is_ok());
+
+        let settler = proof.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let mut guard = settler.lock().await;
+            guard.status = ProofStatus::Completed;
+            guard.notify_completion();
+        });
+
+        let started = Instant::now();
+        assert!(stream.next().await.expect("settled status").is_ok());
+        assert!(started.elapsed() < PROOF_EVENT_POLL_INTERVAL / 2);
+        assert!(stream.next().await.is_none());
+    }
+
+    /// A settle that skips `notify_completion` still reaches the subscriber.
+    #[tokio::test]
+    async fn poll_backstop_delivers_an_unnotified_settle() {
+        let proof = in_progress_proof();
+        let stream = status_events(proof.clone());
+        futures::pin_mut!(stream);
+        assert!(stream.next().await.expect("initial status").is_ok());
+
+        proof.lock().await.status = ProofStatus::Failed("no notify".to_string());
+
+        assert!(stream.next().await.expect("settled status").is_ok());
+        assert!(stream.next().await.is_none());
+    }
 }

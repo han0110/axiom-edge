@@ -211,6 +211,7 @@ ARG PROFILE=release
 # Copy the built binaries from the builder stage
 COPY --from=builder /app/target/$PROFILE/edge-manager .
 COPY --from=builder /app/target/$PROFILE/edge-worker .
+COPY --from=builder /app/target/$PROFILE/convert_fixtures .
 
 # Copy config files
 COPY config/ ./config/

@@ -251,6 +251,30 @@ Get the current state of a proof.
 
 ---
 
+### GET `/proof_events/{proof_uuid}`
+
+Stream the status of a proof as server-sent events. The stream sends the current
+status on subscribe, one `status` event per change, and ends once the status is
+`completed`, `failed` or `canceled`.
+
+**Path Parameters:**
+- `proof_uuid`: The proof identifier
+
+**Response:**
+
+- **200 OK**: `text/event-stream` of `status` events
+```
+event: status
+data: "in_progress"
+
+event: status
+data: "completed"
+```
+
+- **404 Not Found**: Proof not found
+
+---
+
 ### GET `/proof_debug/{proof_uuid}`
 
 Get scheduler-side per-worker debug state for an in-progress proof.
@@ -307,6 +331,42 @@ Cancel an in-progress proof.
   "status": "canceled"
 }
 ```
+
+---
+
+### GET `/vk/{name}`
+
+Download the verification baseline of a loadout program. The baseline is the
+bitcode encoding of the openvm `VerificationBaseline` that
+`convert_fixtures keygen` writes as `baseline.bin`. The loadout supplies the
+version, so the path carries only the program name.
+
+**Path Parameters:**
+- `name`: The program name
+
+**Response:**
+
+- **200 OK**: `application/octet-stream` baseline bytes
+- **404 Not Found**: The program is not in the loadout, or the deployment has no
+  baseline for it
+- **409 Conflict**: The loadout holds more than one version of the program
+
+---
+
+### GET `/proof/{proof_uuid}`
+
+Download the persisted final STARK proof, decompressed.
+
+**Path Parameters:**
+- `proof_uuid`: The proof identifier
+
+**Response:**
+
+- **200 OK**: `application/octet-stream`, the openvm codec encoding of a
+  `VmStarkProof`
+- **400 Bad Request**: Invalid proof_uuid
+- **404 Not Found**: Proof persistence is disabled, or the proof is not
+  persisted
 
 ---
 

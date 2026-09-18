@@ -25,6 +25,10 @@ pub struct ServerConfig {
     /// Total number of workers expected in the proving stack.
     /// Manager gates `/readyz` and `start_proof` on full registration.
     pub num_workers: usize,
+    /// Artifacts export that `GET /vk/{name}` serves baselines from. Defaults
+    /// to the `--from-artifacts` container mount.
+    #[serde(default = "default_artifacts_path")]
+    pub artifacts_path: PathBuf,
 }
 
 /// Per-worker prover capacity expected by every worker in the stack.
@@ -153,6 +157,10 @@ fn default_internal_arity() -> usize {
 
 fn default_metrics_output_dir() -> PathBuf {
     PathBuf::from("/data/metrics")
+}
+
+fn default_artifacts_path() -> PathBuf {
+    PathBuf::from("/data/artifacts")
 }
 
 impl Default for ProofConfig {

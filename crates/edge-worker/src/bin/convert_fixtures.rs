@@ -35,6 +35,7 @@ mod converter {
     };
     use sdk_v2::config::AggregationSystemParams;
     use sdk_v2::fs::write_object_to_file;
+    use sdk_v2::openvm_circuit::arch::instructions::exe::VmExe;
     use sdk_v2::types::ExecutableFormat;
     use sdk_v2::{Sdk, StdIn, F};
     use std::path::{Path, PathBuf};
@@ -457,10 +458,31 @@ mod converter {
         write_object_to_file(&agg_pk_path, &agg_pk).wrap_err("Failed to write agg_stark_pk")?;
         println!("  Wrote agg_stark_pk");
 
+        // The baseline commits to the app exe and every aggregation vk, so a
+        // caller verifies a final proof without the ELF. The exe round-trips
+        // through bitcode so it matches the `program.vmexe` the workers load.
+        println!("  Generating verification baseline...");
+        let exe_bytes =
+            bitcode::serialize(exe.as_ref()).wrap_err("Failed to bitcode-serialize VmExe")?;
+        let normalized_exe: VmExe<F> =
+            bitcode::deserialize(&exe_bytes).wrap_err("Failed to bitcode-deserialize VmExe")?;
+        let baseline = sdk
+            .prover(normalized_exe)
+            .wrap_err("Failed to build the stark prover for the baseline")?
+            .generate_baseline();
+        let baseline_path = output_dir.join("baseline.bin");
+        std::fs::write(
+            &baseline_path,
+            bitcode::serialize(&baseline).wrap_err("Failed to encode the baseline")?,
+        )
+        .wrap_err("Failed to write baseline.bin")?;
+        println!("  Wrote baseline.bin");
+
         println!("\nKeygen complete! Output files:");
         println!("  {}", vmexe_path.display());
         println!("  {}", app_pk_path.display());
         println!("  {}", agg_pk_path.display());
+        println!("  {}", baseline_path.display());
         Ok(())
     }
 
