@@ -972,7 +972,9 @@ mod real_impl {
         let execution_instances = instances.execution_instances.clone();
         let metered_ctx = build_metered_ctx(app_prover, exe, job.segment_memory);
 
-        // Create initial VM state
+        // Cloning a built state copies the whole guest memory image, so the
+        // executor builds the seed state from a copy of the input instead.
+        let seed_stdin = seeds_initial_snapshot(job.prover_id).then(|| stdin.clone());
         let vm_state = execution_instances.metered.create_initial_vm_state(stdin);
 
         // Bounded channel: executor -> prover. Backpressure when channel is full
@@ -995,9 +997,9 @@ mod real_impl {
         let executor_handle = std::thread::spawn(move || -> Result<ExecutorResult> {
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
-            if seeds_initial_snapshot(prover_id) {
+            if let Some(seed_stdin) = seed_stdin {
                 snapshots.push_back(VmSnapshot {
-                    vm_state: vm_state.clone(),
+                    vm_state: metered_interpreter.create_initial_vm_state(seed_stdin),
                     instret: 0,
                 });
             }
@@ -1550,6 +1552,9 @@ mod real_impl {
 
         let metered_ctx = build_metered_ctx(app_prover, exe, job.segment_memory);
 
+        // Cloning a built state copies the whole guest memory image, so the
+        // executor builds the seed state from a copy of the input instead.
+        let seed_stdin = seeds_initial_snapshot(job.prover_id).then(|| stdin.clone());
         let vm_state = execution_instances.metered.create_initial_vm_state(stdin);
 
         let num_provers = job.num_provers;
@@ -1567,9 +1572,9 @@ mod real_impl {
         let executor_handle = std::thread::spawn(move || -> Result<ExecutorResult> {
             let metered_interpreter = &execution_instances_for_executor.metered;
             let mut snapshots: VecDeque<VmSnapshot> = VecDeque::with_capacity(2);
-            if seeds_initial_snapshot(prover_id) {
+            if let Some(seed_stdin) = seed_stdin {
                 snapshots.push_back(VmSnapshot {
-                    vm_state: vm_state.clone(),
+                    vm_state: metered_interpreter.create_initial_vm_state(seed_stdin),
                     instret: 0,
                 });
             }
