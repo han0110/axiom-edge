@@ -333,14 +333,31 @@ mod real_impl {
 
             let wrap_start = std::time::Instant::now();
 
-            // Single wrap: aggregate internal_proof into internal_recursive.
-            info!("Wrap: agg_prove with RecursiveSelf");
-            let wrapped_proof = prover_instance
-                .internal_recursive_prover
-                .agg_prove_no_def::<RecursionEngine>(
-                    &[internal_proof],
-                    ChildVkKind::RecursiveSelf,
-                )?;
+            // A wrap whose child aggregates one proof is smaller than a wrap
+            // whose child aggregates more, so a multi-child input needs a
+            // second wrap to reach the smallest shape. The Evm path keeps one
+            // wrap because root tracegen matches fixed trace heights and
+            // drives its own wrap retries.
+            let num_wraps =
+                if proofs.len() == 1 || job.context.proof_type == protocol::ProofType::Evm {
+                    1
+                } else {
+                    2
+                };
+            let mut wrapped_proof = internal_proof;
+            for wrap_idx in 0..num_wraps {
+                info!(
+                    "Wrap {}/{}: agg_prove with RecursiveSelf",
+                    wrap_idx + 1,
+                    num_wraps
+                );
+                wrapped_proof = prover_instance
+                    .internal_recursive_prover
+                    .agg_prove_no_def::<RecursionEngine>(
+                        &[wrapped_proof],
+                        ChildVkKind::RecursiveSelf,
+                    )?;
+            }
             let wrap_time_ms = wrap_start.elapsed().as_millis() as u64;
             wrap_sub_metrics = telemetry::span_timing::drain_span_timings();
             info!(
