@@ -1089,6 +1089,8 @@ pub async fn proof_result(State(state): State<Arc<AppState>>, body: Bytes) -> im
         // Persisting under the same lock guarantees that a `completed` status
         // seen through `/proof_state` or `/proof_events` has its `/proof` file.
         if matches!(guard.status, ProofStatus::Completed) {
+            // Free the slot before the status or the file is observable.
+            state.state_store.remove_proof(&proof_uuid);
             if let Some(dir) = state.config.proof.persist_final_proofs_dir.as_ref() {
                 if let Err(e) = guard.persist_final_proof_to_disk(
                     dir,
@@ -1679,6 +1681,8 @@ async fn try_finalize_failing_proof(state: &Arc<AppState>, proof_uuid: &str) {
     if let Some(ps) = ps {
         let mut guard = ps.lock().await;
         guard.transition_failing_to_failed();
+        // Free the slot before the status is observable.
+        state.state_store.remove_proof(proof_uuid);
     }
 
     finalize_proof(state, proof_uuid).await;
@@ -2214,3 +2218,6 @@ mod status_event_tests {
         assert!(stream.next().await.is_none());
     }
 }
+
+#[cfg(test)]
+mod slot_release_tests;
