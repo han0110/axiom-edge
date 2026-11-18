@@ -374,7 +374,14 @@ async fn probe_worker_health(
 
         loop {
             match state.http_client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => break,
+                // Without an active proof, a busy worker still runs work of a settled proof.
+                Ok(resp)
+                    if resp.status().is_success()
+                        && (state.state_store.has_any_proofs()
+                            || worker_is_idle(state, &worker.worker_url).await) =>
+                {
+                    break
+                }
                 Ok(resp) => {
                     retries += 1;
                     if retries >= max_retries {
@@ -408,6 +415,18 @@ async fn probe_worker_health(
     }
 
     Ok(())
+}
+
+/// Whether the worker reports no busy app, leaf, or internal prover.
+async fn worker_is_idle(state: &AppState, worker_url: &str) -> bool {
+    let url = format!("{worker_url}/healthz");
+    let Ok(resp) = state.http_client.get(url).send().await else {
+        return false;
+    };
+    let health: serde_json::Value = resp.json().await.unwrap_or_default();
+    ["app", "leaf", "internal"]
+        .iter()
+        .all(|kind| health[format!("{kind}_workers_busy")] == 0)
 }
 
 async fn get_ready_workers(

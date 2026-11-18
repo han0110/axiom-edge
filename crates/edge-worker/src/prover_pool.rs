@@ -790,6 +790,10 @@ impl ProverPool {
                         worker_free.notify_waiters();
 
                         let result = Self::handle_panic_result(name, result);
+                        // A failed job can leave the VM poisoned, so the next job rebuilds it.
+                        if matches!(result, ProverResult::Error(_)) {
+                            loaded = None;
+                        }
                         if result_sender.send(result).is_err() {
                             warn!("Worker {name}: result receiver dropped");
                         }
