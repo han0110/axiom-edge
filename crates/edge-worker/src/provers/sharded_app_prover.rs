@@ -256,6 +256,7 @@ fn prove_sharded_app_impl(job: ShardedAppProverJob) -> Result<Vec<ProofResult>> 
 #[cfg(not(feature = "mock-provers"))]
 mod real_impl {
     use super::super::real_prover_types::{RecursionEngine, SdkVmBuilder};
+    use super::super::AppCancel;
     use super::*;
     use crate::artifacts::ArtifactStore;
     use crossbeam::channel::bounded;
@@ -999,6 +1000,7 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        let executor_cancel = job.cancel.clone();
 
         // --- Executor thread ---
         // Runs metered execution, discovers segments, sends snapshots + metadata
@@ -1021,6 +1023,9 @@ mod real_impl {
 
             loop {
                 let should_break = driver.step()?;
+                if executor_cancel.is_canceled() {
+                    return Err(eyre::eyre!("proof canceled"));
+                }
 
                 let curr_idx = driver.segments().len() - 1;
 
@@ -1108,6 +1113,10 @@ mod real_impl {
         let mut app_results: Vec<ProofResult> = Vec::new();
         let mut prover_err: Option<eyre::Report> = None;
         for prove_data in prove_rx.iter() {
+            if job.cancel.is_canceled() {
+                prover_err = Some(eyre::eyre!("proof canceled"));
+                break;
+            }
             info!("Prover: proving segment {}", prove_data.segment_idx);
             let queue_wait_ms = prove_data.sent_at.elapsed().as_millis() as u64;
             let segment_start = std::time::Instant::now();
@@ -1324,12 +1333,16 @@ mod real_impl {
         streaming_tx: Option<crossbeam::channel::Sender<ProofResult>>,
         context: protocol::ProofContext,
         is_deferral_job: bool,
+        cancel: &AppCancel,
     ) -> ProverResult {
         let vm_config = &instances.vm_config;
         let pure_interpreter = &instances.execution_instances.pure;
         let mut results = Vec::new();
 
         for prove_data in prove_rx.iter() {
+            if cancel.is_canceled() {
+                return consumer_failure("proof canceled".to_string());
+            }
             info!("Consumer: proving segment {}", prove_data.segment_idx);
             let queue_wait_ms = prove_data.sent_at.elapsed().as_millis() as u64;
             let segment_start = std::time::Instant::now();
@@ -1516,32 +1529,50 @@ mod real_impl {
             let consumer_prove_rx = prove_rx.clone();
             let consumer_streaming_tx = streaming_tx.clone();
             let context = job.context.clone();
+            let cancel = job.cancel.clone();
 
             consumers.push(Box::new(
                 move |instances: &AppExecutionInstances, prover: &mut ProverType| {
-                    consume_segments_loop(
-                        instances,
-                        prover,
-                        consumer_prove_rx,
-                        consumer_streaming_tx,
-                        context,
-                        is_deferral_job,
-                    )
+                    cancel_on_failure(&cancel, || {
+                        consume_segments_loop(
+                            instances,
+                            prover,
+                            consumer_prove_rx,
+                            consumer_streaming_tx,
+                            context,
+                            is_deferral_job,
+                            &cancel,
+                        )
+                    })
                 },
             ));
         }
 
         // Create coordinator closure
+        let cancel = job.cancel.clone();
         let coordinator: ParallelCoordinatorFn = Box::new(
             move |instances: &AppExecutionInstances, app_prover: &mut ProverType| {
-                match coordinate_parallel_prove(job, instances, app_prover, prove_tx, prove_rx) {
-                    Ok(results) => ProverResult::Success(results),
-                    Err(e) => ProverResult::Error(format!("Parallel app prove failed: {}", e)),
-                }
+                cancel_on_failure(&cancel, || {
+                    match coordinate_parallel_prove(job, instances, app_prover, prove_tx, prove_rx)
+                    {
+                        Ok(results) => ProverResult::Success(results),
+                        Err(e) => ProverResult::Error(format!("Parallel app prove failed: {}", e)),
+                    }
+                })
             },
         );
 
         Ok((coordinator, consumers))
+    }
+
+    /// Runs one app job of a parallel proof. A failed or panicking job cancels
+    /// the other app jobs of the proof.
+    fn cancel_on_failure(cancel: &AppCancel, run: impl FnOnce() -> ProverResult) -> ProverResult {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+        if !matches!(result, Ok(ProverResult::Success(_))) {
+            cancel.cancel();
+        }
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
     /// Coordinator logic for parallel proving.
@@ -1600,6 +1631,7 @@ mod real_impl {
             None
         };
         let execution_instances_for_executor = execution_instances.clone();
+        let executor_cancel = job.cancel.clone();
 
         // --- Executor thread ---
         // Same as single-threaded version: discovers segments, sends via shared channel
@@ -1621,6 +1653,9 @@ mod real_impl {
 
             loop {
                 let should_break = driver.step()?;
+                if executor_cancel.is_canceled() {
+                    return Err(eyre::eyre!("proof canceled"));
+                }
 
                 let curr_idx = driver.segments().len() - 1;
 
@@ -1709,6 +1744,10 @@ mod real_impl {
         let mut prover_err: Option<eyre::Report> = None;
 
         for prove_data in prove_rx.iter() {
+            if job.cancel.is_canceled() {
+                prover_err = Some(eyre::eyre!("proof canceled"));
+                break;
+            }
             info!(
                 "Coordinator-consumer: proving segment {}",
                 prove_data.segment_idx
@@ -1855,6 +1894,10 @@ mod real_impl {
             }
         }
 
+        // The consumers and the executor stop at their next segment boundary.
+        if prover_err.is_some() {
+            job.cancel.cancel();
+        }
         // Drop prove_rx to unblock executor if still sending
         drop(prove_rx);
 
@@ -1967,6 +2010,7 @@ mod tests {
             max_app_provers: 1,
             result_tx: None,
             deferral_state_paths: vec![],
+            cancel: Default::default(),
         };
 
         let result = prove_sharded_app(job);
@@ -2017,6 +2061,7 @@ mod tests {
             max_app_provers: 1,
             result_tx: None,
             deferral_state_paths: vec![],
+            cancel: Default::default(),
         };
 
         let result = prove_sharded_app(job);

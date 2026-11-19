@@ -368,17 +368,25 @@ async fn probe_worker_health(
     max_retries: usize,
     retry_delay: std::time::Duration,
 ) -> Result<(), String> {
+    // Without an active proof, any work on a worker belongs to a settled proof.
+    // It is canceled, and the probe waits until every worker is idle.
+    let settled = !state.state_store.has_any_proofs();
+    if settled {
+        futures::future::join_all(workers.iter().map(|(_, worker)| {
+            let url = format!("{}/cancel_proofs", worker.worker_url);
+            state.http_client.post(url).send()
+        }))
+        .await;
+    }
     for (worker_id, worker) in workers {
         let url = format!("{}/readyz", worker.worker_url);
         let mut retries = 0;
 
         loop {
             match state.http_client.get(&url).send().await {
-                // Without an active proof, a busy worker still runs work of a settled proof.
                 Ok(resp)
                     if resp.status().is_success()
-                        && (state.state_store.has_any_proofs()
-                            || worker_is_idle(state, &worker.worker_url).await) =>
+                        && (!settled || worker_is_idle(state, &worker.worker_url).await) =>
                 {
                     break
                 }
@@ -1715,9 +1723,8 @@ pub const PROOF_TIMEOUT_WATCHDOG_INTERVAL: std::time::Duration = std::time::Dura
 /// `timeout_secs` as `Failed("timed out…")`. Frees the proof's scheduler
 /// slot so subsequent proofs can claim those workers.
 ///
-/// In-flight worker computation is not canceled (no manager→worker cancel
-/// channel today); workers finish their assigned shards and their results
-/// arrive as "late results" to be silently dropped.
+/// The watchdog does not cancel in-flight worker computation. The next
+/// admission cancels it, see `probe_worker_health`.
 pub async fn proof_timeout_watchdog_task(
     state: Arc<AppState>,
     interval: std::time::Duration,

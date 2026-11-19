@@ -86,6 +86,33 @@ pub struct ShardedAppProverJob {
     /// execution path. The prover reads each file, decodes a `DeferralState`,
     /// and populates `StdIn.deferrals[idx]` before VM execution.
     pub deferral_state_paths: Vec<String>,
+    pub cancel: AppCancel,
+}
+
+/// Cancels the app jobs of a worker that started before the cancel. The job
+/// threads check it at each segment boundary.
+#[derive(Clone, Default)]
+pub struct AppCancel {
+    epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    started: u64,
+}
+
+impl AppCancel {
+    pub fn new(epoch: &std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        let started = epoch.load(std::sync::atomic::Ordering::SeqCst);
+        Self {
+            epoch: epoch.clone(),
+            started,
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst) != self.started
+    }
 }
 
 /// Job for the leaf prover.

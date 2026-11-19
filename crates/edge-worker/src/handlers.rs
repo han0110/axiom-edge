@@ -19,7 +19,9 @@ use tracing::{error, info, instrument, warn};
 use protocol::{GeneralProveRequest, MessageEnvelope, ShardedAppProveRequest};
 
 use crate::prover_pool::{JobType, ProverPool};
-use crate::provers::{InternalProverJob, LeafProverJob, ProverResult, ShardedAppProverJob};
+use crate::provers::{
+    AppCancel, InternalProverJob, LeafProverJob, ProverResult, ShardedAppProverJob,
+};
 use crate::result_client::ResultClient;
 
 /// Shared application state.
@@ -28,6 +30,7 @@ pub struct AppState {
     pub result_client: ResultClient,
     pub worker_config: WorkerInfo,
     pub active_uploaded_proofs: DashSet<String>,
+    pub app_cancel_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 const UPLOADED_INPUT_ROOT: &str = "/dev/shm";
@@ -79,6 +82,14 @@ pub struct HealthResponse {
 pub struct ReadyResponse {
     pub ready: bool,
     pub message: String,
+}
+
+/// Cancels the app jobs that run on this worker.
+pub async fn cancel_proofs(State(state): State<Arc<AppState>>) -> StatusCode {
+    state
+        .app_cancel_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    StatusCode::OK
 }
 
 /// Health check endpoint.
@@ -883,6 +894,7 @@ pub async fn handle_sharded_app_prove(
             max_app_provers: state.worker_config.max_app_provers,
             result_tx: Some(result_tx),
             deferral_state_paths,
+            cancel: AppCancel::new(&state.app_cancel_epoch),
         };
 
         // Bridge: drain crossbeam channel on a blocking thread, POST each result via HTTP

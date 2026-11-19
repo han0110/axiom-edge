@@ -20,7 +20,7 @@ use tracing::info;
 use crate::artifacts::ArtifactStore;
 use crate::config::WorkerConfig;
 use crate::handlers::{
-    handle_recursion_prove, handle_sharded_app_prove, handle_upload_deferral_input,
+    cancel_proofs, handle_recursion_prove, handle_sharded_app_prove, handle_upload_deferral_input,
     handle_upload_deferral_state, handle_upload_input, handle_upload_input_compact, healthz,
     readyz, uploaded_input_janitor_task, AppState, WorkerInfo,
     STALE_UPLOADED_INPUT_JANITOR_INTERVAL, STALE_UPLOADED_INPUT_TTL,
@@ -130,6 +130,7 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
             worker_role: config.worker.worker_role,
         },
         active_uploaded_proofs: Default::default(),
+        app_cancel_epoch: Default::default(),
     });
 
     // Build router.
@@ -158,6 +159,7 @@ pub async fn run_server(config: WorkerConfig) -> Result<()> {
     let app = Router::new()
         // Health endpoints
         .route("/healthz", get(healthz))
+        .route("/cancel_proofs", post(cancel_proofs))
         .route("/readyz", get(readyz))
         // Edge endpoints (per API spec)
         .merge(large_payload_routes) // Routes with larger body limit
